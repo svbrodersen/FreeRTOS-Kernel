@@ -5117,6 +5117,11 @@ BaseType_t xTaskIncrementTick( void )
 /*-----------------------------------------------------------*/
 
 #if ( configNUMBER_OF_CORES == 1 )
+
+    void temporal_fence_t(void) {
+      __asm__ __volatile__("addi x0, x0, 11");
+    }
+
     void vTaskSwitchContext( void )
     {
         traceENTER_vTaskSwitchContext();
@@ -5175,6 +5180,7 @@ BaseType_t xTaskIncrementTick( void )
             /* MISRA Ref 11.5.3 [Void pointer assignment] */
             /* More details at: https://github.com/FreeRTOS/FreeRTOS-Kernel/blob/main/MISRA.md#rule-115 */
             /* coverity[misra_c_2012_rule_11_5_violation] */
+            temporal_fence_t();
             taskSELECT_HIGHEST_PRIORITY_TASK();
             traceTASK_SWITCHED_IN();
 

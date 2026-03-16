@@ -1,0 +1,2 @@
+CompileFlags:
+  Add: [-DconfigNUMBER_OF_CORES=1]
