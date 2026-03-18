@@ -28,8 +28,10 @@
  */
 
 /* Standard includes. */
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 
 /* Defining MPU_WRAPPERS_INCLUDED_FROM_API_FILE prevents task.h from redefining
  * all the API functions to use the MPU wrappers.  That should only be done when
@@ -3697,6 +3699,11 @@ static BaseType_t prvCreateIdleTasks( void )
 
 /*-----------------------------------------------------------*/
 
+
+#if ( configNUMBER_OF_CORES == 1 )
+void temporal_fence_t(void);
+#endif
+
 void vTaskStartScheduler( void )
 {
     BaseType_t xReturn;
@@ -3717,6 +3724,7 @@ void vTaskStartScheduler( void )
     {
         if( xReturn == pdPASS )
         {
+            temporal_fence_t();
             xReturn = xTimerCreateTimerTask();
         }
         else
@@ -5118,6 +5126,12 @@ BaseType_t xTaskIncrementTick( void )
 
 #if ( configNUMBER_OF_CORES == 1 )
 
+    static inline uint64_t rdcycle(void) {
+        uint64_t cycle;
+        __asm__ __volatile__("rdcycle %0" : "=r"(cycle));
+        return cycle;
+    }
+
     void temporal_fence_t(void) {
       __asm__ __volatile__("addi x0, x0, 11");
     }
@@ -5125,6 +5139,7 @@ BaseType_t xTaskIncrementTick( void )
     void vTaskSwitchContext( void )
     {
         traceENTER_vTaskSwitchContext();
+        uint64_t start_cycle = rdcycle();
 
         if( uxSchedulerSuspended != ( UBaseType_t ) 0U )
         {
@@ -5204,7 +5219,11 @@ BaseType_t xTaskIncrementTick( void )
             }
             #endif
         }
-
+        volatile uint64_t wcet = 3000;
+        volatile uint64_t dummy = 0;    
+        for (dummy = 0; dummy < (wcet/2); dummy++) {
+            __asm__ __volatile__("nop");
+        }
         traceRETURN_vTaskSwitchContext();
     }
 #else /* if ( configNUMBER_OF_CORES == 1 ) */
