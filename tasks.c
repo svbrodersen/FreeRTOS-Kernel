@@ -3701,7 +3701,7 @@ static BaseType_t prvCreateIdleTasks( void )
 
 
 #if ( configNUMBER_OF_CORES == 1 )
-void temporal_fence_t(void);
+static void temporal_fence_t(void);
 #endif
 
 void vTaskStartScheduler( void )
@@ -5126,20 +5126,35 @@ BaseType_t xTaskIncrementTick( void )
 
 #if ( configNUMBER_OF_CORES == 1 )
 
-    static inline uint64_t rdcycle(void) {
-        uint64_t cycle;
-        __asm__ __volatile__("rdcycle %0" : "=r"(cycle));
-        return cycle;
+    // read machine cycle count
+    static inline uint32_t read_minstret(void) {
+        uint32_t val;
+
+        __asm__ volatile (
+            "csrr %0, minstret\n"
+            : "=&r"(val)
+        );
+
+        return val;
     }
 
-    void temporal_fence_t(void) {
+    static void temporal_fence_t(void) {
       __asm__ __volatile__("addi x0, x0, 11");
+    }
+
+    static void start_timing(void) {
+      __asm__ __volatile__("addi x0, x0, 12");
+    }
+
+    static void end_timing(void) {
+      __asm__ __volatile__("addi x0, x0, 13");
     }
 
     void vTaskSwitchContext( void )
     {
         traceENTER_vTaskSwitchContext();
-        uint64_t start_cycle = rdcycle();
+        start_timing();
+        uint32_t start_cycle = read_minstret();
 
         if( uxSchedulerSuspended != ( UBaseType_t ) 0U )
         {
@@ -5219,11 +5234,11 @@ BaseType_t xTaskIncrementTick( void )
             }
             #endif
         }
-        volatile uint64_t wcet = 3000;
-        volatile uint64_t dummy = 0;    
-        for (dummy = 0; dummy < (wcet/2); dummy++) {
-            __asm__ __volatile__("nop");
+        volatile uint32_t wcet = 321;
+        while ((read_minstret() - start_cycle) < wcet) {
+              __asm__ __volatile__("addi x0, x0, 14");
         }
+        end_timing();
         traceRETURN_vTaskSwitchContext();
     }
 #else /* if ( configNUMBER_OF_CORES == 1 ) */
