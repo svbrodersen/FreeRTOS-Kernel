@@ -235,19 +235,19 @@
 
     #if ( configENABLE_DOMAINS == 1 )
 
-    #define taskRECORD_READY_PRIORITY( uxPriority )    portRECORD_READY_PRIORITY( ( uxPriority ), uxTopReadyPriority[ xCurrentDomain.uxDomainID ] )
+    #define taskRECORD_READY_PRIORITY( uxPriority )    portRECORD_READY_PRIORITY( ( uxPriority ), uxTopReadyPriority[ xCurrentDomain->uxDomainID ] )
 
 /*-----------------------------------------------------------*/
 
-    #define taskSELECT_HIGHEST_PRIORITY_TASK()                                                  \
-    do {                                                                                        \
-        UBaseType_t uxTopPriority;                                                              \
-        UBaseType_t uxCurrentDomain = xCurrentDomain.uxDomainID                                 \
-                                                                                                \
-        /* Find the highest priority list that contains ready tasks. */                         \
-        portGET_HIGHEST_PRIORITY( uxTopPriority, uxTopReadyPriority[ uxCurrentDomain ] );                          \
-        configASSERT( listCURRENT_LIST_LENGTH( &( pxReadyTasksLists[ uxTopPriority ][ uxCurrentDomain ] ) ) > 0 ); \
-        listGET_OWNER_OF_NEXT_ENTRY( pxCurrentTCB, &( pxReadyTasksLists[ uxTopPriority ][ uxCurrentDomain ] ) );   \
+    #define taskSELECT_HIGHEST_PRIORITY_TASK()                                                                      \
+    do {                                                                                                            \
+        UBaseType_t uxTopPriority;                                                                                  \
+        UBaseType_t uxCurrentDomain = pxCurrentDomain->uxDomainID;                                                  \
+                                                                                                                    \
+        /* Find the highest priority list that contains ready tasks. */                                             \
+        portGET_HIGHEST_PRIORITY( uxTopPriority, uxTopReadyPriority[ uxCurrentDomain ] );                           \
+        configASSERT( listCURRENT_LIST_LENGTH( &( pxReadyTasksLists[ uxTopPriority ][ uxCurrentDomain ] ) ) > 0 );  \
+        listGET_OWNER_OF_NEXT_ENTRY( pxCurrentTCB, &( pxReadyTasksLists[ uxTopPriority ][ uxCurrentDomain ] ) );    \
     } while( 0 )
 
 /*-----------------------------------------------------------*/
@@ -257,7 +257,7 @@
  * or suspended list then it won't be in a ready list. */
     #define taskRESET_READY_PRIORITY( uxPriority )                                                                          \
     do {                                                                                                                    \
-        UBaseType_t uxCurrentDomain = xCurrentDomain.uxDomainID                                                             \
+        UBaseType_t uxCurrentDomain = pxCurrentDomain->uxDomainID;                                                          \
                                                                                                                             \
         if( listCURRENT_LIST_LENGTH( &( pxReadyTasksLists[ ( uxPriority ) ] [ uxCurrentDomain ] ) ) == ( UBaseType_t ) 0 )  \
         {                                                                                                                   \
@@ -542,7 +542,7 @@ PRIVILEGED_DATA static volatile TickType_t xTickCount = ( TickType_t ) configINI
 PRIVILEGED_DATA static volatile TickType_t xPendedTicks = ( TickType_t ) 0U;
 PRIVILEGED_DATA static volatile UBaseType_t uxTopReadyPriority[configNUM_TIME_SLICES];
 PRIVILEGED_DATA static volatile BaseType_t xSchedulerRunning[configNUM_TIME_SLICES];
-PRIVILEGED_DATA static volatile BaseType_t xYieldPendings[ configNUMBER_OF_CORES ][configNUM_TIME_SLICES] = { pdFALSE };
+PRIVILEGED_DATA static volatile BaseType_t xYieldPendings[ configNUMBER_OF_CORES ][configNUM_TIME_SLICES];
 PRIVILEGED_DATA static volatile BaseType_t xNumOfOverflows[configNUM_TIME_SLICES];
 PRIVILEGED_DATA static UBaseType_t uxTaskNumber[configNUM_TIME_SLICES];
 PRIVILEGED_DATA static volatile TickType_t xNextTaskUnblockTime[configNUM_TIME_SLICES]; /* Initialised to portMAX_DELAY before the scheduler starts. */
@@ -575,12 +575,9 @@ typedef struct domDomainBlock {
   TCB_t * volatile pxPreviousTCB; /* Last running task in this domain */
 } domDB;
 
-portDONT_DISCARD PRIVILEGED_DATA static domDB xDomains[configNUM_TIME_SLICES];
+PRIVILEGED_DATA static domDB xDomains[configNUM_TIME_SLICES];
 
-portDONT_DISCARD PRIVILEGED_DATA static domDB xCurrentDomain = {
-    .uxDomainID: ( UBaseType_t ) 0U,
-    .uxLength: ( size_t ) configNUM_TIME_SLICES;
-};
+PRIVILEGED_DATA static domDB * pxCurrentDomain = NULL;
 
 PRIVILEGED_DATA static volatile TickType_t xDomainTick = ( TickType_t ) 0;
 
@@ -3562,14 +3559,6 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
 
 #endif /* INCLUDE_vTaskSuspend */
 
-#if ( configENABLE_DOMAINS == 1)
-    static  vGetDomain( void ) {
-        return;
-    }
-#endif
-
-
-
 /*-----------------------------------------------------------*/
 
 #if ( ( INCLUDE_xTaskResumeFromISR == 1 ) && ( INCLUDE_vTaskSuspend == 1 ) )
@@ -3822,7 +3811,63 @@ static BaseType_t prvCreateIdleTasks( void )
 
 
 #if ( configENABLE_DOMAINS == 1 )
-static void temporal_fence_t(void);
+    static void temporal_fence_t(void);
+
+    static void prvInitializeDomains( void ) {
+        // Initially domain 0 owns all time slices
+        xDomains[0].uxDomainID = 0;
+        xDomains[0].uxStart = 0;
+        xDomains[0].uxLength = configNUM_TIME_SLICES;
+        xDomains[0].pxPreviousTCB = NULL;
+
+        pxCurrentDomain = &xDomains[0];
+    }
+
+    static BaseType_t prvCreateDomain(uint32_t ulSliceOffset, uint32_t ulSliceLength) {
+        size_t uxParentStart = pxCurrentDomain->uxStart;
+        size_t uxParentLength = pxCurrentDomain->uxLength;
+
+        // Validate parameters
+        if (pxParams == NULL) {
+            return pdFAIL;
+        }
+
+        // Check offset and length are within parent domain
+        if (ulSliceOffset + ulSliceLength > uxParentLength) {
+            return pdFAIL; // Requested slices exceed parent domain
+        }
+
+        if (ulSliceLength == 0) {
+            return pdFAIL; // Must have at least one time slice
+        }
+
+        UBaseType_t uxNextDomainSlot = xParentStart + ulSliceOffset;
+
+        // Sanity check, should never happen, TODO: remove this after testing
+        if (uxNextDomainSlot >= configNUM_TIME_SLICES) {
+            exit(1);
+        }
+
+        xDomains[uxNextDomainSlot].uxDomainID = uxNewDomainSlot;
+        xDomains[uxNextDomainSlot].uxStart = xAbsoluteStart;
+        xDomains[uxNextDomainSlot].uxLength = ulSliceLength;
+        xDomains[uxNextDomainSlot].pxPreviousTCB = NULL;
+
+        // Possibly split parent domain, we now have a non-contingous size for the parent.
+        if (ulSliceOffset + ulSliceLength < uxParentLength) {
+            xDomains[xParentStart].uxLength = uxNextDomainSlot - xParentStart;
+            xDomains[uxNextDomainSlot + ulSliceLength] = {
+                .uxStart = uxNextDomainSlot + ulSliceLength,
+                .uxLength = xParentLength - xDomains[xParentStart].length - ulSliceLength
+            }
+        } else {
+            // Otherwise just reduce parent length
+            xDomains[uxParentStart].uxLength -= ulSliceLength;
+        }
+
+        *puxNewDomainSlot = uxNewDomainSlot;
+        return pdPASS;
+    }
 #endif
 
 void vTaskStartScheduler( void )
@@ -5115,9 +5160,9 @@ BaseType_t xTaskIncrementTick( void )
         xDomainTick = xConstTickCount;
 
         /* Time slot expired */
-        if (xDomainTick > xCurrentDomain.uxStart + xCurrentDomain.uxLength) {
+        if (xDomainTick > pxCurrentDomain.uxStart + pxCurrentDomain.uxLength) {
             xSwitchRequired = pdTRUE;
-            xCurrentDomain = xDomains[xDomainTick];
+            pxCurrentDomain = xDomains[xDomainTick];
 
             /* Flush on domain switch */
             temporal_fence_t();
@@ -5291,7 +5336,7 @@ BaseType_t xTaskIncrementTick( void )
 
     void vTaskSwitchContext( void )
     {
-        UBaseType_t uxCurrentDomainID = xCurrentDomain.uxDomainID;
+        UBaseType_t uxCurrentDomainID = xCurrentDomain->uxDomainID;
         traceENTER_vTaskSwitchContext();
         if( uxSchedulerSuspended[uxCurrentDomainID] != ( UBaseType_t ) 0U )
         {
@@ -6246,6 +6291,52 @@ static portTASK_FUNCTION( prvIdleTask, pvParameters )
 #endif /* portUSING_MPU_WRAPPERS */
 /*-----------------------------------------------------------*/
 
+#if ( configENABLE_DOMAINS == 1)
+static void prvInitialiseTaskLists( void )
+{
+    for (UBaseType_t uxDomain = 0; uxDomain < configNUM_TIME_SLICES; uxDomain++) {
+        UBaseType_t uxPriority;
+
+        for( uxPriority = ( UBaseType_t ) 0U; uxPriority < ( UBaseType_t ) configMAX_PRIORITIES; uxPriority++ )
+        {
+            vListInitialise( &( pxReadyTasksLists[ uxPriority ][ uxDomain ] ) );
+        }
+
+        vListInitialise(&(xDelayedTaskList1[uxDomain]));
+        vListInitialise(&(xDelayedTaskList2[uxDomain]));
+        vListInitialise(&(xPendingReadyList[uxDomain]));
+
+
+        #if (INCLUDE_vTaskDelete == 1)
+        {
+            vListInitialise(&(xTasksWaitingTermination[uxDomain]));
+            uxDeletedTasksWaitingCleanUp[uxDomain] = (UBaseType_t) 0U;
+        }
+        #endif /* INCLUDE_vTaskDelete */
+
+        #if ( INCLUDE_vTaskSuspend == 1 )
+        {
+            vListInitialise(&(xSuspendedTaskList[uxDomain]));
+        }
+        #endif /* INCLUDE_vTaskSuspend */
+
+        uxTopReadyPriority[uxDomain] = tskIDLE_PRIORITY;
+        xSchedulerRunning[uxDomain] = pdFALSE;
+        uxSchedulerSuspended[uxDomain] = (UBaseType_t) 0U;
+        xNextTaskUnblockTime[uxDomain] = portMAX_DELAY;
+        
+        for (BaseType_t xCore = 0; xCore < configNUMBER_OF_CORES; xCore++) {
+            xYieldPendings[xCore][uxDomain] = pdFALSE;
+        }
+
+        /* Start with pxDelayedTaskList using list1 and the pxOverflowDelayedTaskList
+         * using list2. */
+        pxDelayedTaskList[uxDomain] = &xDelayedTaskList1[uxDomain];
+        pxOverflowDelayedTaskList[uxDomain] = &xDelayedTaskList2[uxDomain];
+    }
+}
+#else
+
 static void prvInitialiseTaskLists( void )
 {
     UBaseType_t uxPriority;
@@ -6276,6 +6367,10 @@ static void prvInitialiseTaskLists( void )
     pxDelayedTaskList = &xDelayedTaskList1;
     pxOverflowDelayedTaskList = &xDelayedTaskList2;
 }
+
+#endif
+
+
 /*-----------------------------------------------------------*/
 
 static void prvCheckTasksWaitingTermination( void )

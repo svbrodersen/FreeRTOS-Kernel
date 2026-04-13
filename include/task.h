@@ -135,6 +135,15 @@ typedef struct xTIME_OUT
     TickType_t xTimeOnEntering;
 } TimeOut_t;
 
+
+/*
+ * Defines Parameters used for creating a new domain
+ */
+typedef struct xDOMAIN_PARAMETERS {
+    uint32_t ulSliceOffset;   /* Offset into parent domain's time slice */
+    uint32_t ulSliceLength;   /* Number of time slices for new domain */
+} DomainParameters_t;
+
 /*
  * Defines the memory ranges allocated to the task when an MPU is used.
  */
@@ -159,6 +168,9 @@ typedef struct xTASK_PARAMETERS
     MemoryRegion_t xRegions[ portNUM_CONFIGURABLE_REGIONS ];
     #if ( ( portUSING_MPU_WRAPPERS == 1 ) && ( configSUPPORT_STATIC_ALLOCATION == 1 ) )
         StaticTask_t * const pxTaskBuffer;
+    #endif
+    #if (configENABLE_DOMAINS == 1)
+        DomainParameters_t * pxDomainParameters;  // NULL = same domain, non-NULL = new domain
     #endif
 } TaskParameters_t;
 

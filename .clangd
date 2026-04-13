@@ -3,3 +3,5 @@ CompileFlags:
     - "-include"
     - "../Demo/RISC-V_RV32_MPU_QEMU_VIRT_GCC/FreeRTOSConfig.h"
     - "-DconfigASSERT_DEFINED=1"
+    - "-DportUSING_MPU_WRAPPERS=1"
+    - "-DconfigENABLE_DOMAINS=1"
