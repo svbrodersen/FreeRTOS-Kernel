@@ -201,6 +201,18 @@
     #endif
 #endif
 
+#if defined(configENABLE_DOMAINS)
+#ifndef configNUM_TIME_SLICES
+#error Missing definition: configNUM_TIME_SLICES must be defined in FreeRTOSConfig.h when configENABLE_DOMAINS is set.
+#endif // !configNUM_TIME_SLICES
+#ifndef configENABLE_MPU
+#error Missing definition: configENABLE_MPU must be defined in FreeRTOSConfig.h when configENABLE_DOMAINS is set.
+#endif // !configENABLE_MPU
+#if (configNUMBER_OF_CORES > 1)
+#error configENABLE_DOMAINS only implemented for single core use
+#endif
+#endif
+
 #ifndef configUSE_TICK_HOOK
     #error Missing definition:  configUSE_TICK_HOOK must be defined in FreeRTOSConfig.h as either 1 or 0.  See the Configuration section of the FreeRTOS API documentation for details.
 #endif
@@ -3218,6 +3230,10 @@ typedef struct xSTATIC_TCB
     #endif
     #if ( configUSE_POSIX_ERRNO == 1 )
         int iDummy22;
+    #endif
+
+    #if ( configENABLE_DOMAINS == 1 )
+        size_t xDummy23;
     #endif
 } StaticTask_t;
 

@@ -28,6 +28,7 @@
  */
 
 /* Standard includes. */
+#include "include/mpu_wrappers.h"
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -231,6 +232,41 @@
  * architecture being used. */
 
 /* A port optimised version is provided.  Call the port defined macros. */
+
+    #if ( configENABLE_DOMAINS == 1 )
+
+    #define taskRECORD_READY_PRIORITY( uxPriority )    portRECORD_READY_PRIORITY( ( uxPriority ), uxTopReadyPriority[ xCurrentDomain.uxDomainID ] )
+
+/*-----------------------------------------------------------*/
+
+    #define taskSELECT_HIGHEST_PRIORITY_TASK()                                                  \
+    do {                                                                                        \
+        UBaseType_t uxTopPriority;                                                              \
+        UBaseType_t uxCurrentDomain = xCurrentDomain.uxDomainID                                 \
+                                                                                                \
+        /* Find the highest priority list that contains ready tasks. */                         \
+        portGET_HIGHEST_PRIORITY( uxTopPriority, uxTopReadyPriority[ uxCurrentDomain ] );                          \
+        configASSERT( listCURRENT_LIST_LENGTH( &( pxReadyTasksLists[ uxTopPriority ][ uxCurrentDomain ] ) ) > 0 ); \
+        listGET_OWNER_OF_NEXT_ENTRY( pxCurrentTCB, &( pxReadyTasksLists[ uxTopPriority ][ uxCurrentDomain ] ) );   \
+    } while( 0 )
+
+/*-----------------------------------------------------------*/
+
+/* A port optimised version is provided, call it only if the TCB being reset
+ * is being referenced from a ready list.  If it is referenced from a delayed
+ * or suspended list then it won't be in a ready list. */
+    #define taskRESET_READY_PRIORITY( uxPriority )                                                                          \
+    do {                                                                                                                    \
+        UBaseType_t uxCurrentDomain = xCurrentDomain.uxDomainID                                                             \
+                                                                                                                            \
+        if( listCURRENT_LIST_LENGTH( &( pxReadyTasksLists[ ( uxPriority ) ] [ uxCurrentDomain ] ) ) == ( UBaseType_t ) 0 )  \
+        {                                                                                                                   \
+            portRESET_READY_PRIORITY( ( uxPriority ), ( uxTopReadyPriority[ uxCurrentDomain ] ) );                          \
+        }                                                                                                                   \
+    } while( 0 )
+        
+    #else 
+
     #define taskRECORD_READY_PRIORITY( uxPriority )    portRECORD_READY_PRIORITY( ( uxPriority ), uxTopReadyPriority )
 
 /*-----------------------------------------------------------*/
@@ -257,6 +293,9 @@
             portRESET_READY_PRIORITY( ( uxPriority ), ( uxTopReadyPriority ) );                        \
         }                                                                                              \
     } while( 0 )
+
+    #endif
+
 
 #endif /* configUSE_PORT_OPTIMISED_TASK_SELECTION */
 
@@ -475,6 +514,78 @@ typedef tskTCB TCB_t;
  * xDelayedTaskList1 and xDelayedTaskList2 could be moved to function scope but
  * doing so breaks some kernel aware debuggers and debuggers that rely on removing
  * the static qualifier. */
+#if ( configENABLE_DOMAINS == 1 )
+
+PRIVILEGED_DATA static List_t pxReadyTasksLists[ configMAX_PRIORITIES ][configNUM_TIME_SLICES]; /**< Prioritised ready tasks. */
+PRIVILEGED_DATA static List_t xDelayedTaskList1[configNUM_TIME_SLICES];                         /**< Delayed tasks. */
+PRIVILEGED_DATA static List_t xDelayedTaskList2[configNUM_TIME_SLICES];                         /**< Delayed tasks (two lists are used - one for delays that have overflowed the current tick count. */
+PRIVILEGED_DATA static List_t * volatile pxDelayedTaskList[configNUM_TIME_SLICES];              /**< Points to the delayed task list currently being used. */
+PRIVILEGED_DATA static List_t * volatile pxOverflowDelayedTaskList[configNUM_TIME_SLICES];      /**< Points to the delayed task list currently being used to hold tasks that have overflowed the current tick count. */
+PRIVILEGED_DATA static List_t xPendingReadyList[configNUM_TIME_SLICES];                         /**< Tasks that have been readied while the scheduler was suspended.  They will be moved to the ready list when the scheduler is resumed. */
+
+#if ( INCLUDE_vTaskDelete == 1 )
+
+    PRIVILEGED_DATA static List_t xTasksWaitingTermination[configNUM_TIME_SLICES]; /**< Tasks that have been deleted - but their memory not yet freed. */
+    PRIVILEGED_DATA static volatile UBaseType_t uxDeletedTasksWaitingCleanUp[configNUM_TIME_SLICES];
+
+#endif
+
+#if ( INCLUDE_vTaskSuspend == 1 )
+
+    PRIVILEGED_DATA static List_t xSuspendedTaskList[configNUM_TIME_SLICES]; /**< Tasks that are currently suspended. */
+
+#endif
+
+/* Other file private variables. --------------------------------*/
+PRIVILEGED_DATA static volatile UBaseType_t uxCurrentNumberOfTasks = ( UBaseType_t ) 0U;
+PRIVILEGED_DATA static volatile TickType_t xTickCount = ( TickType_t ) configINITIAL_TICK_COUNT;
+PRIVILEGED_DATA static volatile TickType_t xPendedTicks = ( TickType_t ) 0U;
+PRIVILEGED_DATA static volatile UBaseType_t uxTopReadyPriority[configNUM_TIME_SLICES];
+PRIVILEGED_DATA static volatile BaseType_t xSchedulerRunning[configNUM_TIME_SLICES];
+PRIVILEGED_DATA static volatile BaseType_t xYieldPendings[ configNUMBER_OF_CORES ][configNUM_TIME_SLICES] = { pdFALSE };
+PRIVILEGED_DATA static volatile BaseType_t xNumOfOverflows[configNUM_TIME_SLICES];
+PRIVILEGED_DATA static UBaseType_t uxTaskNumber[configNUM_TIME_SLICES];
+PRIVILEGED_DATA static volatile TickType_t xNextTaskUnblockTime[configNUM_TIME_SLICES]; /* Initialised to portMAX_DELAY before the scheduler starts. */
+PRIVILEGED_DATA static TaskHandle_t xIdleTaskHandles[ configNUMBER_OF_CORES ];       /**< Holds the handles of the idle tasks.  The idle tasks are created automatically when the scheduler is started. */
+
+/* Improve support for OpenOCD. The kernel tracks Ready tasks via priority lists.
+ * For tracking the state of remote threads, OpenOCD uses uxTopUsedPriority
+ * to determine the number of priority lists to read back from the remote target. */
+static const volatile UBaseType_t uxTopUsedPriority = configMAX_PRIORITIES - 1U;
+
+/* Context switches are held pending while the scheduler is suspended.  Also,
+ * interrupts must not manipulate the xStateListItem of a TCB, or any of the
+ * lists the xStateListItem can be referenced from, if the scheduler is suspended.
+ * If an interrupt needs to unblock a task while the scheduler is suspended then it
+ * moves the task's event list item into the xPendingReadyList, ready for the
+ * kernel to move the task from the pending ready list into the real ready list
+ * when the scheduler is unsuspended.  The pending ready list itself can only be
+ * accessed from a critical section.
+ *
+ * Updates to uxSchedulerSuspended must be protected by both the task lock and the ISR lock
+ * and must not be done from an ISR. Reads must be protected by either lock and may be done
+ * from either an ISR or a task. */
+PRIVILEGED_DATA static volatile UBaseType_t uxSchedulerSuspended[configNUM_TIME_SLICES];
+
+typedef struct domDomainBlock {
+  UBaseType_t uxDomainID; /* This time slices domain ID */
+  size_t uxStart; /* Start of this domain */
+  size_t uxLength; /* Length of this domain */
+
+  TCB_t * volatile pxPreviousTCB; /* Last running task in this domain */
+} domDB;
+
+portDONT_DISCARD PRIVILEGED_DATA static domDB xDomains[configNUM_TIME_SLICES];
+
+portDONT_DISCARD PRIVILEGED_DATA static domDB xCurrentDomain = {
+    .uxDomainID: ( UBaseType_t ) 0U,
+    .uxLength: ( size_t ) configNUM_TIME_SLICES;
+};
+
+PRIVILEGED_DATA static volatile TickType_t xDomainTick = ( TickType_t ) 0;
+
+#else
+
 PRIVILEGED_DATA static List_t pxReadyTasksLists[ configMAX_PRIORITIES ]; /**< Prioritised ready tasks. */
 PRIVILEGED_DATA static List_t xDelayedTaskList1;                         /**< Delayed tasks. */
 PRIVILEGED_DATA static List_t xDelayedTaskList2;                         /**< Delayed tasks (two lists are used - one for delays that have overflowed the current tick count. */
@@ -493,12 +604,6 @@ PRIVILEGED_DATA static List_t xPendingReadyList;                         /**< Ta
 
     PRIVILEGED_DATA static List_t xSuspendedTaskList; /**< Tasks that are currently suspended. */
 
-#endif
-
-/* Global POSIX errno. Its value is changed upon context switching to match
- * the errno of the currently running task. */
-#if ( configUSE_POSIX_ERRNO == 1 )
-    int FreeRTOS_errno = 0;
 #endif
 
 /* Other file private variables. --------------------------------*/
@@ -531,6 +636,14 @@ static const volatile UBaseType_t uxTopUsedPriority = configMAX_PRIORITIES - 1U;
  * and must not be done from an ISR. Reads must be protected by either lock and may be done
  * from either an ISR or a task. */
 PRIVILEGED_DATA static volatile UBaseType_t uxSchedulerSuspended = ( UBaseType_t ) 0U;
+
+#endif
+
+/* Global POSIX errno. Its value is changed upon context switching to match
+ * the errno of the currently running task. */
+#if ( configUSE_POSIX_ERRNO == 1 )
+    int FreeRTOS_errno = 0;
+#endif
 
 #if ( configGENERATE_RUN_TIME_STATS == 1 )
 
@@ -3449,6 +3562,14 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
 
 #endif /* INCLUDE_vTaskSuspend */
 
+#if ( configENABLE_DOMAINS == 1)
+    static  vGetDomain( void ) {
+        return;
+    }
+#endif
+
+
+
 /*-----------------------------------------------------------*/
 
 #if ( ( INCLUDE_xTaskResumeFromISR == 1 ) && ( INCLUDE_vTaskSuspend == 1 ) )
@@ -3700,7 +3821,7 @@ static BaseType_t prvCreateIdleTasks( void )
 /*-----------------------------------------------------------*/
 
 
-#if ( configNUMBER_OF_CORES == 1 )
+#if ( configENABLE_DOMAINS == 1 )
 static void temporal_fence_t(void);
 #endif
 
@@ -4985,6 +5106,24 @@ BaseType_t xTaskIncrementTick( void )
         #endif
     }
 
+    #if ( configENABLE_DOMAINS == 1 )
+        /* Minor optimisation.  The tick count cannot change in this
+         * block. */
+        const TickType_t xConstTickCount = xTickCount % configNUM_TIME_SLICES;
+
+        /* Update the domain tick */
+        xDomainTick = xConstTickCount;
+
+        /* Time slot expired */
+        if (xDomainTick > xCurrentDomain.uxStart + xCurrentDomain.uxStart) {
+            xSwitchRequired = pdTRUE;
+            xCurrentDomain = xDomains[xDomainTick];
+
+            /* Flush on domain switch */
+            temporal_fence_t();
+        }
+    #endif
+
     traceRETURN_xTaskIncrementTick( xSwitchRequired );
 
     return xSwitchRequired;
@@ -5152,19 +5291,17 @@ BaseType_t xTaskIncrementTick( void )
 
     void vTaskSwitchContext( void )
     {
+        UBaseType_t uxCurrentDomainID = xCurrentDomain.uxDomainID;
         traceENTER_vTaskSwitchContext();
-        start_timing();
-        uint32_t start_cycle = read_minstret();
-
-        if( uxSchedulerSuspended != ( UBaseType_t ) 0U )
+        if( uxSchedulerSuspended[uxCurrentDomainID] != ( UBaseType_t ) 0U )
         {
             /* The scheduler is currently suspended - do not allow a context
              * switch. */
-            xYieldPendings[ 0 ] = pdTRUE;
+            xYieldPendings[ 0 ][uxCurrentDomainID] = pdTRUE;
         }
         else
         {
-            xYieldPendings[ 0 ] = pdFALSE;
+            xYieldPendings[ 0 ][uxCurrentDomainID] = pdFALSE;
             traceTASK_SWITCHED_OUT();
 
             #if ( configGENERATE_RUN_TIME_STATS == 1 )
@@ -5210,7 +5347,6 @@ BaseType_t xTaskIncrementTick( void )
             /* MISRA Ref 11.5.3 [Void pointer assignment] */
             /* More details at: https://github.com/FreeRTOS/FreeRTOS-Kernel/blob/main/MISRA.md#rule-115 */
             /* coverity[misra_c_2012_rule_11_5_violation] */
-            temporal_fence_t();
             taskSELECT_HIGHEST_PRIORITY_TASK();
             traceTASK_SWITCHED_IN();
 
@@ -5234,11 +5370,6 @@ BaseType_t xTaskIncrementTick( void )
             }
             #endif
         }
-        volatile uint32_t wcet = 321;
-        while ((read_minstret() - start_cycle) < wcet) {
-              __asm__ __volatile__("addi x0, x0, 14");
-        }
-        end_timing();
         traceRETURN_vTaskSwitchContext();
     }
 #else /* if ( configNUMBER_OF_CORES == 1 ) */
