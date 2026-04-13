@@ -2,3 +2,4 @@ CompileFlags:
   Add: 
     - "-include"
     - "../Demo/RISC-V_RV32_MPU_QEMU_VIRT_GCC/FreeRTOSConfig.h"
+    - "-DconfigASSERT_DEFINED=1"
