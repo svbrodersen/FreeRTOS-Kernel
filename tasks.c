@@ -5115,7 +5115,7 @@ BaseType_t xTaskIncrementTick( void )
         xDomainTick = xConstTickCount;
 
         /* Time slot expired */
-        if (xDomainTick > xCurrentDomain.uxStart + xCurrentDomain.uxStart) {
+        if (xDomainTick > xCurrentDomain.uxStart + xCurrentDomain.uxLength) {
             xSwitchRequired = pdTRUE;
             xCurrentDomain = xDomains[xDomainTick];
 
