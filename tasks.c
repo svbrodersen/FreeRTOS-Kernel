@@ -235,7 +235,8 @@
 
     #if ( configENABLE_DOMAINS == 1 )
 
-    #define taskRECORD_READY_PRIORITY( uxPriority )    portRECORD_READY_PRIORITY( ( uxPriority ), uxTopReadyPriority[ xCurrentDomain->uxDomainID ] )
+    #define taskRECORD_READY_PRIORITY( uxPriority )    \
+        portRECORD_READY_PRIORITY(uxPriority, uxTopReadyPriority[pxCurrentDomain->uxDomainID] )
 
 /*-----------------------------------------------------------*/
 
@@ -255,11 +256,11 @@
 /* A port optimised version is provided, call it only if the TCB being reset
  * is being referenced from a ready list.  If it is referenced from a delayed
  * or suspended list then it won't be in a ready list. */
-    #define taskRESET_READY_PRIORITY( uxPriority )                                                                          \
-    do {                                                                                                                    \
-        UBaseType_t uxCurrentDomain = pxCurrentDomain->uxDomainID;                                                          \
-                                                                                                                            \
-        if( listCURRENT_LIST_LENGTH( &( pxReadyTasksLists[ ( uxPriority ) ] [ uxCurrentDomain ] ) ) == ( UBaseType_t ) 0 )  \
+    #define taskRESET_READY_PRIORITY( uxPriority )                                                  \
+    do {                                                                                            \
+        UBaseType_t uxCurrentDomain = pxCurrentDomain->uxDomainID;                                  \
+        if( listCURRENT_LIST_LENGTH( \
+                    &(pxReadyTasksLists[uxPriority][uxCurrentDomain])) == ( UBaseType_t ) 0 )  \
         {                                                                                                                   \
             portRESET_READY_PRIORITY( ( uxPriority ), ( uxTopReadyPriority[ uxCurrentDomain ] ) );                          \
         }                                                                                                                   \
@@ -323,6 +324,21 @@
  * Place the task represented by pxTCB into the appropriate ready list for
  * the task.  It is inserted at the end of the list.
  */
+
+#if ( configENABLE_DOMAINS == 1 )
+
+#define prvAddTaskToReadyList( pxTCB, uxDomainID)                                    \
+        do {                                                                         \
+            traceMOVED_TASK_TO_READY_STATE(pxTCB);                                   \
+            taskRECORD_READY_PRIORITY((pxTCB)->uxPriority);                          \
+            listINSERT_END(                                                          \
+                &(pxReadyTasksLists[(pxTCB)->uxPriority][uxDomainID]),               \
+                &((pxTCB)->xStateListItem));                                         \
+            tracePOST_MOVED_TASK_TO_READY_STATE(pxTCB);                              \
+        } while(0)
+
+#else
+
 #define prvAddTaskToReadyList( pxTCB )                                                                     \
     do {                                                                                                   \
         traceMOVED_TASK_TO_READY_STATE( pxTCB );                                                           \
@@ -330,6 +346,9 @@
         listINSERT_END( &( pxReadyTasksLists[ ( pxTCB )->uxPriority ] ), &( ( pxTCB )->xStateListItem ) ); \
         tracePOST_MOVED_TASK_TO_READY_STATE( pxTCB );                                                      \
     } while( 0 )
+
+#endif
+
 /*-----------------------------------------------------------*/
 
 /*
@@ -1689,6 +1708,23 @@ static void prvAddNewTaskToReadyList( TCB_t * pxNewTCB ) PRIVILEGED_FUNCTION;
 
         traceENTER_xTaskCreateRestricted( pxTaskDefinition, pxCreatedTask );
 
+        #if ( configENABLE_DOMAINS == 1 )
+            domDB* pxTargetDomain;
+            UBaseType_t uxNewDomainSlot;
+
+            if (pxTaskDefinition->xDomainParameters == NULL) {
+                pxTargetDomain = pxCurrentDomain;
+            } else {
+                xReturn = prvCreateDomain(pxTaskDefinition->xDomainParameters, uxNewDomainSlot);
+                if (xReturn != pdPASS) {
+
+                        traceRETURN_xTaskCreateRestricted( xReturn );
+                    return xReturn
+                }
+                pxTargetDomain = &xDomains[uxNewDOmainSlot];
+            }
+        #endif
+
         pxNewTCB = prvCreateRestrictedTask( pxTaskDefinition, pxCreatedTask );
 
         if( pxNewTCB != NULL )
@@ -1700,7 +1736,15 @@ static void prvAddNewTaskToReadyList( TCB_t * pxNewTCB ) PRIVILEGED_FUNCTION;
             }
             #endif /* #if ( ( configNUMBER_OF_CORES > 1 ) && ( configUSE_CORE_AFFINITY == 1 ) ) */
 
-            prvAddNewTaskToReadyList( pxNewTCB );
+            #if ( configENABLE_DOMAINS == 1 )
+            {
+                prvAddNewTaskToReadyList( pxNewTCB , uxNewDomainSlot);
+            }
+            #else
+            {
+                prvAddNewTaskToReadyList( pxNewTCB );
+            }
+            #endif
 
             xReturn = pdPASS;
         }
@@ -3823,14 +3867,12 @@ static BaseType_t prvCreateIdleTasks( void )
         pxCurrentDomain = &xDomains[0];
     }
 
-    static BaseType_t prvCreateDomain(uint32_t ulSliceOffset, uint32_t ulSliceLength) {
+    static BaseType_t prvCreateDomain(DomainParameters_t* pxParams, UBaseType_t * puxNewDomainSlot) {
         size_t uxParentStart = pxCurrentDomain->uxStart;
         size_t uxParentLength = pxCurrentDomain->uxLength;
 
-        // Validate parameters
-        if (pxParams == NULL) {
-            return pdFAIL;
-        }
+        uint32_t ulSliceOffset = pxParams->ulSliceOffset;
+        uint32_t ulSliceLength = pxParams->ulSliceLength;
 
         // Check offset and length are within parent domain
         if (ulSliceOffset + ulSliceLength > uxParentLength) {
@@ -3855,7 +3897,7 @@ static BaseType_t prvCreateIdleTasks( void )
 
         // Possibly split parent domain, we now have a non-contingous size for the parent.
         if (ulSliceOffset + ulSliceLength < uxParentLength) {
-            xDomains[xParentStart].uxLength = uxNextDomainSlot - xParentStart;
+            xDomains[xParentStart].uxLength = uxNextDomainSlot - uxParentStart;
             xDomains[uxNextDomainSlot + ulSliceLength] = {
                 .uxStart = uxNextDomainSlot + ulSliceLength,
                 .uxLength = xParentLength - xDomains[xParentStart].length - ulSliceLength
@@ -3865,7 +3907,7 @@ static BaseType_t prvCreateIdleTasks( void )
             xDomains[uxParentStart].uxLength -= ulSliceLength;
         }
 
-        *puxNewDomainSlot = uxNewDomainSlot;
+        *puxNewDomainSlot = uxNextDomainSlot;
         return pdPASS;
     }
 #endif
@@ -3890,7 +3932,6 @@ void vTaskStartScheduler( void )
     {
         if( xReturn == pdPASS )
         {
-            temporal_fence_t();
             xReturn = xTimerCreateTimerTask();
         }
         else
@@ -5336,9 +5377,9 @@ BaseType_t xTaskIncrementTick( void )
 
     void vTaskSwitchContext( void )
     {
-        UBaseType_t uxCurrentDomainID = xCurrentDomain->uxDomainID;
         traceENTER_vTaskSwitchContext();
-        if( uxSchedulerSuspended[uxCurrentDomainID] != ( UBaseType_t ) 0U )
+        UBaseType_t uxCurrentDomainID = pxCurrentDomain->uxDomainID;
+        if( uxSchedulerSuspended[ uxCurrentDomainID ] != ( UBaseType_t ) 0U )
         {
             /* The scheduler is currently suspended - do not allow a context
              * switch. */
