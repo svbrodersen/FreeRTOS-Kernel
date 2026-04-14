@@ -304,6 +304,22 @@
 
 /* pxDelayedTaskList and pxOverflowDelayedTaskList are switched when the tick
  * count overflows. */
+#if ( configENABLE_DOMAINS == 1 )
+#define taskSWITCH_DELAYED_LISTS()                                                                    \
+    do {                                                                                              \
+        List_t * pxTemp;                                                                              \
+        UBaseType_t uxCurrentDomain = pxCurrentDomain->uxDomainID;                                    \
+                                                                                                      \
+        /* The delayed tasks list should be empty when the lists are switched. */                     \
+        configASSERT( ( listLIST_IS_EMPTY( pxDelayedTaskList[ uxCurrentDomain ] ) ) );                \
+                                                                                                      \
+        pxTemp = pxDelayedTaskList[ uxCurrentDomain ];                                                \
+        pxDelayedTaskList[ uxCurrentDomain ] = pxOverflowDelayedTaskList[ uxCurrentDomain ];          \
+        pxOverflowDelayedTaskList[ uxCurrentDomain ] = pxTemp;                                        \
+        xNumOfOverflows[ uxCurrentDomain ] = ( BaseType_t ) ( xNumOfOverflows[ uxCurrentDomain ] + 1 ); \
+        prvResetNextTaskUnblockTime();                                                                \
+    } while( 0 )
+#else
 #define taskSWITCH_DELAYED_LISTS()                                                \
     do {                                                                          \
         List_t * pxTemp;                                                          \
@@ -317,6 +333,7 @@
         xNumOfOverflows = ( BaseType_t ) ( xNumOfOverflows + 1 );                 \
         prvResetNextTaskUnblockTime();                                            \
     } while( 0 )
+#endif
 
 /*-----------------------------------------------------------*/
 
@@ -407,23 +424,43 @@
 /* Yields the given core. This must be called from a critical section and xCoreID
  * must be valid. This macro is not required in single core since there is only
  * one core to yield. */
-    #define prvYieldCore( xCoreID )                                                          \
-    do {                                                                                     \
-        if( ( xCoreID ) == ( BaseType_t ) portGET_CORE_ID() )                                \
-        {                                                                                    \
-            /* Pending a yield for this core since it is in the critical section. */         \
-            xYieldPendings[ ( xCoreID ) ] = pdTRUE;                                          \
-        }                                                                                    \
-        else                                                                                 \
-        {                                                                                    \
-            /* Request other core to yield if it is not requested before. */                 \
-            if( pxCurrentTCBs[ ( xCoreID ) ]->xTaskRunState != taskTASK_SCHEDULED_TO_YIELD ) \
-            {                                                                                \
-                portYIELD_CORE( xCoreID );                                                   \
-                pxCurrentTCBs[ ( xCoreID ) ]->xTaskRunState = taskTASK_SCHEDULED_TO_YIELD;   \
-            }                                                                                \
-        }                                                                                    \
-    } while( 0 )
+    #if ( configENABLE_DOMAINS == 1 )
+        #define prvYieldCore( xCoreID )                                                          \
+        do {                                                                                     \
+            if( ( xCoreID ) == ( BaseType_t ) portGET_CORE_ID() )                                \
+            {                                                                                    \
+                /* Pending a yield for this core since it is in the critical section. */         \
+                xYieldPendings[ ( xCoreID ) ][ pxCurrentDomain->uxDomainID ] = pdTRUE;           \
+            }                                                                                    \
+            else                                                                                 \
+            {                                                                                    \
+                /* Request other core to yield if it is not requested before. */                 \
+                if( pxCurrentTCBs[ ( xCoreID ) ]->xTaskRunState != taskTASK_SCHEDULED_TO_YIELD ) \
+                {                                                                                \
+                    portYIELD_CORE( xCoreID );                                                   \
+                    pxCurrentTCBs[ ( xCoreID ) ]->xTaskRunState = taskTASK_SCHEDULED_TO_YIELD;   \
+                }                                                                                \
+            }                                                                                    \
+        } while( 0 )
+    #else
+        #define prvYieldCore( xCoreID )                                                          \
+        do {                                                                                     \
+            if( ( xCoreID ) == ( BaseType_t ) portGET_CORE_ID() )                                \
+            {                                                                                    \
+                /* Pending a yield for this core since it is in the critical section. */         \
+                xYieldPendings[ ( xCoreID ) ] = pdTRUE;                                          \
+            }                                                                                    \
+            else                                                                                 \
+            {                                                                                    \
+                /* Request other core to yield if it is not requested before. */                 \
+                if( pxCurrentTCBs[ ( xCoreID ) ]->xTaskRunState != taskTASK_SCHEDULED_TO_YIELD ) \
+                {                                                                                \
+                    portYIELD_CORE( xCoreID );                                                   \
+                    pxCurrentTCBs[ ( xCoreID ) ]->xTaskRunState = taskTASK_SCHEDULED_TO_YIELD;   \
+                }                                                                                \
+            }                                                                                    \
+        } while( 0 )
+    #endif
 #endif /* #if ( configNUMBER_OF_CORES > 1 ) */
 /*-----------------------------------------------------------*/
 
@@ -556,15 +593,15 @@ PRIVILEGED_DATA static List_t xPendingReadyList[configNUM_TIME_SLICES];         
 #endif
 
 /* Other file private variables. --------------------------------*/
-PRIVILEGED_DATA static volatile UBaseType_t uxCurrentNumberOfTasks = ( UBaseType_t ) 0U;
+PRIVILEGED_DATA static volatile UBaseType_t uxCurrentNumberOfTasks[configNUM_TIME_SLICES] = {0U};
 PRIVILEGED_DATA static volatile TickType_t xTickCount = ( TickType_t ) configINITIAL_TICK_COUNT;
-PRIVILEGED_DATA static volatile TickType_t xPendedTicks = ( TickType_t ) 0U;
-PRIVILEGED_DATA static volatile UBaseType_t uxTopReadyPriority[configNUM_TIME_SLICES];
-PRIVILEGED_DATA static volatile BaseType_t xSchedulerRunning[configNUM_TIME_SLICES];
-PRIVILEGED_DATA static volatile BaseType_t xYieldPendings[ configNUMBER_OF_CORES ][configNUM_TIME_SLICES];
-PRIVILEGED_DATA static volatile BaseType_t xNumOfOverflows[configNUM_TIME_SLICES];
-PRIVILEGED_DATA static UBaseType_t uxTaskNumber[configNUM_TIME_SLICES];
-PRIVILEGED_DATA static volatile TickType_t xNextTaskUnblockTime[configNUM_TIME_SLICES]; /* Initialised to portMAX_DELAY before the scheduler starts. */
+PRIVILEGED_DATA static volatile UBaseType_t uxTopReadyPriority[configNUM_TIME_SLICES] = { tskIDLE_PRIORITY };
+PRIVILEGED_DATA static volatile TickType_t xPendedTicks[configNUM_TIME_SLICES] = {( TickType_t ) 0U};
+PRIVILEGED_DATA static volatile BaseType_t xSchedulerRunning[configNUM_TIME_SLICES] = { pdFALSE };
+PRIVILEGED_DATA static volatile BaseType_t xYieldPendings[ configNUMBER_OF_CORES ][configNUM_TIME_SLICES] = {pdFALSE};
+PRIVILEGED_DATA static volatile BaseType_t xNumOfOverflows[configNUM_TIME_SLICES] = {( BaseType_t ) 0U};
+PRIVILEGED_DATA static UBaseType_t uxTaskNumber[configNUM_TIME_SLICES] = { ( UBaseType_t ) 0U };
+PRIVILEGED_DATA static volatile TickType_t xNextTaskUnblockTime[configNUM_TIME_SLICES] = { ( UBaseType_t ) 0U }; /* Initialised to portMAX_DELAY before the scheduler starts. */
 PRIVILEGED_DATA static TaskHandle_t xIdleTaskHandles[ configNUMBER_OF_CORES ];       /**< Holds the handles of the idle tasks.  The idle tasks are created automatically when the scheduler is started. */
 
 /* Improve support for OpenOCD. The kernel tracks Ready tasks via priority lists.
@@ -584,7 +621,7 @@ static const volatile UBaseType_t uxTopUsedPriority = configMAX_PRIORITIES - 1U;
  * Updates to uxSchedulerSuspended must be protected by both the task lock and the ISR lock
  * and must not be done from an ISR. Reads must be protected by either lock and may be done
  * from either an ISR or a task. */
-PRIVILEGED_DATA static volatile UBaseType_t uxSchedulerSuspended[configNUM_TIME_SLICES];
+PRIVILEGED_DATA static volatile UBaseType_t uxSchedulerSuspended[configNUM_TIME_SLICES] = { ( UBaseType_t ) 0U };
 
 typedef struct domDomainBlock {
   UBaseType_t uxDomainID; /* This time slices domain ID */
@@ -715,6 +752,10 @@ static BaseType_t prvCreateIdleTasks( void );
     static BaseType_t prvTaskIsTaskSuspended( const TaskHandle_t xTask ) PRIVILEGED_FUNCTION;
 
 #endif /* INCLUDE_vTaskSuspend */
+
+#if ( configENABLE_DOMAINS == 1 )
+    static BaseType_t prvCreateDomain(DomainParameters_t* pxParams, UBaseType_t * puxNewDomainSlot);
+#endif
 
 /*
  * Utility to ready all the lists used by the scheduler.  This is called
@@ -1038,7 +1079,11 @@ static void prvAddNewTaskToReadyList( TCB_t * pxNewTCB ) PRIVILEGED_FUNCTION;
 
             /* No task should yield for this one if it is a lower priority
              * than priority level of currently ready tasks. */
-            if( pxTCB->uxPriority >= uxTopReadyPriority )
+            #if ( configENABLE_DOMAINS == 1 )
+                if( pxTCB->uxPriority >= uxTopReadyPriority[ pxCurrentDomain->uxDomainID ] )
+            #else
+                if( pxTCB->uxPriority >= uxTopReadyPriority )
+            #endif
         #else
             /* Yield is not required for a task which is already running. */
             if( taskTASK_IS_RUNNING( pxTCB ) == pdFALSE )
@@ -1060,7 +1105,11 @@ static void prvAddNewTaskToReadyList( TCB_t * pxNewTCB ) PRIVILEGED_FUNCTION;
                     xCurrentCoreTaskPriority = ( BaseType_t ) ( xCurrentCoreTaskPriority - 1 );
                 }
 
-                if( ( taskTASK_IS_RUNNING( pxCurrentTCBs[ xCoreID ] ) != pdFALSE ) && ( xYieldPendings[ xCoreID ] == pdFALSE ) )
+                #if ( configENABLE_DOMAINS == 1 )
+                    if( ( taskTASK_IS_RUNNING( pxCurrentTCBs[ xCoreID ] ) != pdFALSE ) && ( xYieldPendings[ xCoreID ][ pxCurrentDomain->uxDomainID ] == pdFALSE ) )
+                #else
+                    if( ( taskTASK_IS_RUNNING( pxCurrentTCBs[ xCoreID ] ) != pdFALSE ) && ( xYieldPendings[ xCoreID ] == pdFALSE ) )
+                #endif
                 {
                     #if ( configRUN_MULTIPLE_PRIORITIES == 0 )
                         if( taskTASK_IS_RUNNING( pxTCB ) == pdFALSE )
@@ -1124,8 +1173,13 @@ static void prvAddNewTaskToReadyList( TCB_t * pxNewTCB ) PRIVILEGED_FUNCTION;
                 if( ( ( pxCurrentTCBs[ xCurrentCoreID ]->uxTaskAttributes & taskATTRIBUTE_IS_IDLE ) == 0U ) &&
                     ( pxTCB->uxPriority > pxCurrentTCBs[ xCurrentCoreID ]->uxPriority ) )
                 {
-                    configASSERT( ( xYieldPendings[ xCurrentCoreID ] == pdTRUE ) ||
-                                  ( taskTASK_IS_RUNNING( pxCurrentTCBs[ xCurrentCoreID ] ) == pdFALSE ) );
+                    #if ( configENABLE_DOMAINS == 1 )
+                        configASSERT( ( xYieldPendings[ xCurrentCoreID ][ pxCurrentDomain->uxDomainID ] == pdTRUE ) ||
+                                      ( taskTASK_IS_RUNNING( pxCurrentTCBs[ xCurrentCoreID ] ) == pdFALSE ) );
+                    #else
+                        configASSERT( ( xYieldPendings[ xCurrentCoreID ] == pdTRUE ) ||
+                                      ( taskTASK_IS_RUNNING( pxCurrentTCBs[ xCurrentCoreID ] ) == pdFALSE ) );
+                    #endif
                 }
             #endif
         }
@@ -1136,7 +1190,11 @@ static void prvAddNewTaskToReadyList( TCB_t * pxNewTCB ) PRIVILEGED_FUNCTION;
 #if ( configNUMBER_OF_CORES > 1 )
     static void prvSelectHighestPriorityTask( BaseType_t xCoreID )
     {
-        UBaseType_t uxCurrentPriority = uxTopReadyPriority;
+        #if ( configENABLE_DOMAINS == 1 )
+            UBaseType_t uxCurrentPriority = uxTopReadyPriority[ pxCurrentDomain->uxDomainID ];
+        #else
+            UBaseType_t uxCurrentPriority = uxTopReadyPriority;
+        #endif
         BaseType_t xTaskScheduled = pdFALSE;
         BaseType_t xDecrementTopPriority = pdTRUE;
         TCB_t * pxTCB = NULL;
@@ -1149,7 +1207,11 @@ static void prvAddNewTaskToReadyList( TCB_t * pxNewTCB ) PRIVILEGED_FUNCTION;
         #endif
 
         /* This function should be called when scheduler is running. */
-        configASSERT( xSchedulerRunning == pdTRUE );
+        #if ( configENABLE_DOMAINS == 1 )
+            configASSERT( xSchedulerRunning[ pxCurrentDomain->uxDomainID ] == pdTRUE );
+        #else
+            configASSERT( xSchedulerRunning == pdTRUE );
+        #endif
 
         /* A new task is created and a running task with the same priority yields
          * itself to run the new task. When a running task yields itself, it is still
@@ -1161,19 +1223,33 @@ static void prvAddNewTaskToReadyList( TCB_t * pxNewTCB ) PRIVILEGED_FUNCTION;
          *
          * To fix these problems, the running task should be put to the end of the
          * ready list before searching for the ready task in the ready list. */
-        if( listIS_CONTAINED_WITHIN( &( pxReadyTasksLists[ pxCurrentTCBs[ xCoreID ]->uxPriority ] ),
-                                     &pxCurrentTCBs[ xCoreID ]->xStateListItem ) == pdTRUE )
-        {
-            ( void ) uxListRemove( &pxCurrentTCBs[ xCoreID ]->xStateListItem );
-            vListInsertEnd( &( pxReadyTasksLists[ pxCurrentTCBs[ xCoreID ]->uxPriority ] ),
-                            &pxCurrentTCBs[ xCoreID ]->xStateListItem );
-        }
+        #if ( configENABLE_DOMAINS == 1 )
+            if( listIS_CONTAINED_WITHIN( &( pxReadyTasksLists[ pxCurrentTCBs[ xCoreID ]->uxPriority ][ pxCurrentDomain->uxDomainID ] ),
+                                         &pxCurrentTCBs[ xCoreID ]->xStateListItem ) == pdTRUE )
+            {
+                ( void ) uxListRemove( &pxCurrentTCBs[ xCoreID ]->xStateListItem );
+                vListInsertEnd( &( pxReadyTasksLists[ pxCurrentTCBs[ xCoreID ]->uxPriority ][ pxCurrentDomain->uxDomainID ] ),
+                                &pxCurrentTCBs[ xCoreID ]->xStateListItem );
+            }
+        #else
+            if( listIS_CONTAINED_WITHIN( &( pxReadyTasksLists[ pxCurrentTCBs[ xCoreID ]->uxPriority ] ),
+                                         &pxCurrentTCBs[ xCoreID ]->xStateListItem ) == pdTRUE )
+            {
+                ( void ) uxListRemove( &pxCurrentTCBs[ xCoreID ]->xStateListItem );
+                vListInsertEnd( &( pxReadyTasksLists[ pxCurrentTCBs[ xCoreID ]->uxPriority ] ),
+                                &pxCurrentTCBs[ xCoreID ]->xStateListItem );
+            }
+        #endif
 
         while( xTaskScheduled == pdFALSE )
         {
             #if ( configRUN_MULTIPLE_PRIORITIES == 0 )
             {
-                if( uxCurrentPriority < uxTopReadyPriority )
+                #if ( configENABLE_DOMAINS == 1 )
+                    if( uxCurrentPriority < uxTopReadyPriority[ pxCurrentDomain->uxDomainID ] )
+                #else
+                    if( uxCurrentPriority < uxTopReadyPriority )
+                #endif
                 {
                     /* We can't schedule any tasks, other than idle, that have a
                      * priority lower than the priority of a task currently running
@@ -1183,9 +1259,15 @@ static void prvAddNewTaskToReadyList( TCB_t * pxNewTCB ) PRIVILEGED_FUNCTION;
             }
             #endif
 
-            if( listLIST_IS_EMPTY( &( pxReadyTasksLists[ uxCurrentPriority ] ) ) == pdFALSE )
-            {
-                const List_t * const pxReadyList = &( pxReadyTasksLists[ uxCurrentPriority ] );
+            #if ( configENABLE_DOMAINS == 1 )
+                if( listLIST_IS_EMPTY( &( pxReadyTasksLists[ uxCurrentPriority ][ pxCurrentDomain->uxDomainID ] ) ) == pdFALSE )
+                {
+                    const List_t * const pxReadyList = &( pxReadyTasksLists[ uxCurrentPriority ][ pxCurrentDomain->uxDomainID ] );
+            #else
+                if( listLIST_IS_EMPTY( &( pxReadyTasksLists[ uxCurrentPriority ] ) ) == pdFALSE )
+                {
+                    const List_t * const pxReadyList = &( pxReadyTasksLists[ uxCurrentPriority ] );
+            #endif
                 const ListItem_t * pxEndMarker = listGET_END_MARKER( pxReadyList );
                 ListItem_t * pxIterator;
 
@@ -1205,7 +1287,11 @@ static void prvAddNewTaskToReadyList( TCB_t * pxNewTCB ) PRIVILEGED_FUNCTION;
                         /* When falling back to the idle priority because only one priority
                          * level is allowed to run at a time, we should ONLY schedule the true
                          * idle tasks, not user tasks at the idle priority. */
-                        if( uxCurrentPriority < uxTopReadyPriority )
+                        #if ( configENABLE_DOMAINS == 1 )
+                            if( uxCurrentPriority < uxTopReadyPriority[ pxCurrentDomain->uxDomainID ] )
+                        #else
+                            if( uxCurrentPriority < uxTopReadyPriority )
+                        #endif
                         {
                             if( ( pxTCB->uxTaskAttributes & taskATTRIBUTE_IS_IDLE ) == 0U )
                             {
@@ -1261,7 +1347,11 @@ static void prvAddNewTaskToReadyList( TCB_t * pxNewTCB ) PRIVILEGED_FUNCTION;
             {
                 if( xDecrementTopPriority != pdFALSE )
                 {
-                    uxTopReadyPriority--;
+                    #if ( configENABLE_DOMAINS == 1 )
+                        uxTopReadyPriority[ pxCurrentDomain->uxDomainID ]--;
+                    #else
+                        uxTopReadyPriority--;
+                    #endif
                     #if ( configRUN_MULTIPLE_PRIORITIES == 0 )
                     {
                         xPriorityDropped = pdTRUE;
@@ -1374,9 +1464,15 @@ static void prvAddNewTaskToReadyList( TCB_t * pxNewTCB ) PRIVILEGED_FUNCTION;
 
                             uxCoreMap &= ~( ( UBaseType_t ) 1U << uxCore );
 
-                            if( ( xTaskPriority < xLowestPriority ) &&
-                                ( taskTASK_IS_RUNNING( pxCurrentTCBs[ uxCore ] ) != pdFALSE ) &&
-                                ( xYieldPendings[ uxCore ] == pdFALSE ) )
+                            #if ( configENABLE_DOMAINS == 1 )
+                                if( ( xTaskPriority < xLowestPriority ) &&
+                                    ( taskTASK_IS_RUNNING( pxCurrentTCBs[ uxCore ] ) != pdFALSE ) &&
+                                    ( xYieldPendings[ uxCore ][ pxCurrentDomain->uxDomainID ] == pdFALSE ) )
+                            #else
+                                if( ( xTaskPriority < xLowestPriority ) &&
+                                    ( taskTASK_IS_RUNNING( pxCurrentTCBs[ uxCore ] ) != pdFALSE ) &&
+                                    ( xYieldPendings[ uxCore ] == pdFALSE ) )
+                            #endif
                             {
                                 #if ( configUSE_TASK_PREEMPTION_DISABLE == 1 )
                                     if( pxCurrentTCBs[ uxCore ]->xPreemptionDisable == pdFALSE )
@@ -1712,16 +1808,16 @@ static void prvAddNewTaskToReadyList( TCB_t * pxNewTCB ) PRIVILEGED_FUNCTION;
             domDB* pxTargetDomain;
             UBaseType_t uxNewDomainSlot;
 
-            if (pxTaskDefinition->xDomainParameters == NULL) {
+            if (pxTaskDefinition->pxDomainParameters == NULL) {
                 pxTargetDomain = pxCurrentDomain;
             } else {
-                xReturn = prvCreateDomain(pxTaskDefinition->xDomainParameters, uxNewDomainSlot);
+                xReturn = prvCreateDomain(pxTaskDefinition->pxDomainParameters, &uxNewDomainSlot);
                 if (xReturn != pdPASS) {
 
                         traceRETURN_xTaskCreateRestricted( xReturn );
-                    return xReturn
+                    return xReturn;
                 }
-                pxTargetDomain = &xDomains[uxNewDOmainSlot];
+                pxTargetDomain = &xDomains[uxNewDomainSlot];
             }
         #endif
 
@@ -1735,16 +1831,7 @@ static void prvAddNewTaskToReadyList( TCB_t * pxNewTCB ) PRIVILEGED_FUNCTION;
                 pxNewTCB->uxCoreAffinityMask = configTASK_DEFAULT_CORE_AFFINITY;
             }
             #endif /* #if ( ( configNUMBER_OF_CORES > 1 ) && ( configUSE_CORE_AFFINITY == 1 ) ) */
-
-            #if ( configENABLE_DOMAINS == 1 )
-            {
-                prvAddNewTaskToReadyList( pxNewTCB , uxNewDomainSlot);
-            }
-            #else
-            {
-                prvAddNewTaskToReadyList( pxNewTCB );
-            }
-            #endif
+            prvAddNewTaskToReadyList( pxNewTCB );
 
             xReturn = pdPASS;
         }
@@ -2211,7 +2298,11 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
          * updated. */
         taskENTER_CRITICAL();
         {
-            uxCurrentNumberOfTasks = ( UBaseType_t ) ( uxCurrentNumberOfTasks + 1U );
+            #if ( configENABLE_DOMAINS == 1 )
+                uxCurrentNumberOfTasks[pxCurrentDomain->uxDomainID] = ( UBaseType_t ) ( uxCurrentNumberOfTasks[pxCurrentDomain->uxDomainID] + 1U );
+            #else
+                uxCurrentNumberOfTasks = ( UBaseType_t ) ( uxCurrentNumberOfTasks + 1U );
+            #endif
 
             if( pxCurrentTCB == NULL )
             {
@@ -2219,7 +2310,11 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
                  * the suspended state - make this the current task. */
                 pxCurrentTCB = pxNewTCB;
 
+            #if ( configENABLE_DOMAINS == 1 )
+                if( uxCurrentNumberOfTasks[pxCurrentDomain->uxDomainID] == ( UBaseType_t ) 1 )
+            #else
                 if( uxCurrentNumberOfTasks == ( UBaseType_t ) 1 )
+            #endif
                 {
                     /* This is the first task to be created so do the preliminary
                      * initialisation required.  We will not recover if this call
@@ -2236,7 +2331,11 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
                 /* If the scheduler is not already running, make this task the
                  * current task if it is the highest priority task to be created
                  * so far. */
-                if( xSchedulerRunning == pdFALSE )
+                #if ( configENABLE_DOMAINS == 1 )
+                    if( xSchedulerRunning[ pxCurrentDomain->uxDomainID ] == pdFALSE )
+                #else
+                    if( xSchedulerRunning == pdFALSE )
+                #endif
                 {
                     if( pxCurrentTCB->uxPriority <= pxNewTCB->uxPriority )
                     {
@@ -2253,23 +2352,39 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
                 }
             }
 
-            uxTaskNumber++;
+            #if ( configENABLE_DOMAINS == 1 )
+                uxTaskNumber[ pxCurrentDomain->uxDomainID ]++;
+            #else
+                uxTaskNumber++;
+            #endif
 
             #if ( configUSE_TRACE_FACILITY == 1 )
             {
                 /* Add a counter into the TCB for tracing only. */
-                pxNewTCB->uxTCBNumber = uxTaskNumber;
+                #if ( configENABLE_DOMAINS == 1 )
+                    pxNewTCB->uxTCBNumber = uxTaskNumber[ pxCurrentDomain->uxDomainID ];
+                #else
+                    pxNewTCB->uxTCBNumber = uxTaskNumber;
+                #endif
             }
             #endif /* configUSE_TRACE_FACILITY */
             traceTASK_CREATE( pxNewTCB );
 
-            prvAddTaskToReadyList( pxNewTCB );
+            #if ( configENABLE_DOMAINS == 1 )
+                prvAddTaskToReadyList( pxNewTCB, pxCurrentDomain->uxDomainID );
+            #else
+                prvAddTaskToReadyList( pxNewTCB );
+            #endif
 
             portSETUP_TCB( pxNewTCB );
         }
-        taskEXIT_CRITICAL();
+            taskEXIT_CRITICAL();
 
-        if( xSchedulerRunning != pdFALSE )
+        #if ( configENABLE_DOMAINS == 1 )
+            if( xSchedulerRunning[ pxCurrentDomain->uxDomainID ] != pdFALSE )
+        #else
+            if( xSchedulerRunning != pdFALSE )
+        #endif
         {
             /* If the created task is of a higher priority than the current task
              * then it should run now. */
@@ -2291,7 +2406,11 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
         {
             uxCurrentNumberOfTasks++;
 
-            if( xSchedulerRunning == pdFALSE )
+            #if ( configENABLE_DOMAINS == 1 )
+                if( xSchedulerRunning[ pxCurrentDomain->uxDomainID ] == pdFALSE )
+            #else
+                if( xSchedulerRunning == pdFALSE )
+            #endif
             {
                 if( uxCurrentNumberOfTasks == ( UBaseType_t ) 1 )
                 {
@@ -2310,21 +2429,37 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
                  * created in prvCreateIdleTasks(). */
             }
 
-            uxTaskNumber++;
+            #if ( configENABLE_DOMAINS == 1 )
+                uxTaskNumber[ pxCurrentDomain->uxDomainID ]++;
+            #else
+                uxTaskNumber++;
+            #endif
 
             #if ( configUSE_TRACE_FACILITY == 1 )
             {
                 /* Add a counter into the TCB for tracing only. */
-                pxNewTCB->uxTCBNumber = uxTaskNumber;
+                #if ( configENABLE_DOMAINS == 1 )
+                    pxNewTCB->uxTCBNumber = uxTaskNumber[ pxCurrentDomain->uxDomainID ];
+                #else
+                    pxNewTCB->uxTCBNumber = uxTaskNumber;
+                #endif
             }
             #endif /* configUSE_TRACE_FACILITY */
             traceTASK_CREATE( pxNewTCB );
 
-            prvAddTaskToReadyList( pxNewTCB );
+            #if ( configENABLE_DOMAINS == 1 )
+                prvAddTaskToReadyList( pxNewTCB, pxCurrentDomain->uxDomainID );
+            #else
+                prvAddTaskToReadyList( pxNewTCB );
+            #endif
 
             portSETUP_TCB( pxNewTCB );
 
-            if( xSchedulerRunning != pdFALSE )
+            #if ( configENABLE_DOMAINS == 1 )
+                if( xSchedulerRunning[ pxCurrentDomain->uxDomainID ] != pdFALSE )
+            #else
+                if( xSchedulerRunning != pdFALSE )
+            #endif
             {
                 /* If the created task is of a higher priority than another
                  * currently running task and preemption is on then it should
@@ -2416,7 +2551,11 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
              * detect that the task lists need re-generating.  This is done before
              * portPRE_TASK_DELETE_HOOK() as in the Windows port that macro will
              * not return. */
-            uxTaskNumber++;
+            #if ( configENABLE_DOMAINS == 1 )
+                uxTaskNumber[ pxCurrentDomain->uxDomainID ]++;
+            #else
+                uxTaskNumber++;
+            #endif
 
             /* Use temp variable as distinct sequence points for reading volatile
              * variables prior to a logical operator to ensure compliance with
@@ -2426,7 +2565,11 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
             /* If the task is running (or yielding), we must add it to the
              * termination list so that an idle task can delete it when it is
              * no longer running. */
-            if( ( xSchedulerRunning != pdFALSE ) && ( xTaskIsRunningOrYielding != pdFALSE ) )
+            #if ( configENABLE_DOMAINS == 1 )
+                if( ( xSchedulerRunning[ pxCurrentDomain->uxDomainID ] != pdFALSE ) && ( xTaskIsRunningOrYielding != pdFALSE ) )
+            #else
+                if( ( xSchedulerRunning != pdFALSE ) && ( xTaskIsRunningOrYielding != pdFALSE ) )
+            #endif
             {
                 /* A running task or a task which is scheduled to yield is being
                  * deleted. This cannot complete when the task is still running
@@ -2434,12 +2577,20 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
                  * Place the task in the termination list. The idle task will check
                  * the termination list and free up any memory allocated by the
                  * scheduler for the TCB and stack of the deleted task. */
-                vListInsertEnd( &xTasksWaitingTermination, &( pxTCB->xStateListItem ) );
+                #if ( configENABLE_DOMAINS == 1 )
+                    vListInsertEnd( &xTasksWaitingTermination[ pxCurrentDomain->uxDomainID ], &( pxTCB->xStateListItem ) );
+                #else
+                    vListInsertEnd( &xTasksWaitingTermination, &( pxTCB->xStateListItem ) );
+                #endif
 
                 /* Increment the ucTasksDeleted variable so the idle task knows
                  * there is a task that has been deleted and that it should therefore
                  * check the xTasksWaitingTermination list. */
-                ++uxDeletedTasksWaitingCleanUp;
+                #if ( configENABLE_DOMAINS == 1 )
+                    ++uxDeletedTasksWaitingCleanUp[ pxCurrentDomain->uxDomainID ];
+                #else
+                    ++uxDeletedTasksWaitingCleanUp;
+                #endif
 
                 /* Call the delete hook before portPRE_TASK_DELETE_HOOK() as
                  * portPRE_TASK_DELETE_HOOK() does not return in the Win32 port. */
@@ -2454,9 +2605,17 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
                  * hence xYieldPending is used to latch that a context switch is
                  * required. */
                 #if ( configNUMBER_OF_CORES == 1 )
-                    portPRE_TASK_DELETE_HOOK( pxTCB, &( xYieldPendings[ 0 ] ) );
+                    #if ( configENABLE_DOMAINS == 1 )
+                        portPRE_TASK_DELETE_HOOK( pxTCB, &( xYieldPendings[ 0 ][ pxCurrentDomain->uxDomainID ] ) );
+                    #else
+                        portPRE_TASK_DELETE_HOOK( pxTCB, &( xYieldPendings[ 0 ] ) );
+                    #endif
                 #else
-                    portPRE_TASK_DELETE_HOOK( pxTCB, &( xYieldPendings[ pxTCB->xTaskRunState ] ) );
+                    #if ( configENABLE_DOMAINS == 1 )
+                        portPRE_TASK_DELETE_HOOK( pxTCB, &( xYieldPendings[ pxTCB->xTaskRunState ][ pxCurrentDomain->uxDomainID ] ) );
+                    #else
+                        portPRE_TASK_DELETE_HOOK( pxTCB, &( xYieldPendings[ pxTCB->xTaskRunState ] ) );
+                    #endif
                 #endif
 
                 /* In the case of SMP, it is possible that the task being deleted
@@ -2485,7 +2644,7 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
             }
             else
             {
-                --uxCurrentNumberOfTasks;
+                --uxCurrentNumberOfTasks[pxCurrentDomain->uxDomainID];
                 traceTASK_DELETE( pxTCB );
 
                 /* Reset the next expected unblock time in case it referred to
@@ -2547,7 +2706,11 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
              * block. */
             const TickType_t xConstTickCount = xTickCount;
 
-            configASSERT( uxSchedulerSuspended == 1U );
+            #if ( configENABLE_DOMAINS == 1 )
+                configASSERT( uxSchedulerSuspended[ pxCurrentDomain->uxDomainID ] == 1U );
+            #else
+                configASSERT( uxSchedulerSuspended == 1U );
+            #endif
 
             /* Generate the tick time at which the task wants to wake. */
             xTimeToWake = *pxPreviousWakeTime + xTimeIncrement;
@@ -2633,7 +2796,11 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
         {
             vTaskSuspendAll();
             {
+                #if ( configENABLE_DOMAINS == 1 )
+                configASSERT( uxSchedulerSuspended[ pxCurrentDomain->uxDomainID ] == 1U );
+            #else
                 configASSERT( uxSchedulerSuspended == 1U );
+            #endif
 
                 traceTASK_DELAY();
 
@@ -2698,12 +2865,21 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
             {
                 pxStateList = listLIST_ITEM_CONTAINER( &( pxTCB->xStateListItem ) );
                 pxEventList = listLIST_ITEM_CONTAINER( &( pxTCB->xEventListItem ) );
-                pxDelayedList = pxDelayedTaskList;
-                pxOverflowedDelayedList = pxOverflowDelayedTaskList;
+                #if ( configENABLE_DOMAINS == 1 )
+                    pxDelayedList = pxDelayedTaskList[ pxCurrentDomain->uxDomainID ];
+                    pxOverflowedDelayedList = pxOverflowDelayedTaskList[ pxCurrentDomain->uxDomainID ];
+                #else
+                    pxDelayedList = pxDelayedTaskList;
+                    pxOverflowedDelayedList = pxOverflowDelayedTaskList;
+                #endif
             }
             taskEXIT_CRITICAL();
 
-            if( pxEventList == &xPendingReadyList )
+            #if ( configENABLE_DOMAINS == 1 )
+                if( pxEventList == &xPendingReadyList[ pxCurrentDomain->uxDomainID ] )
+            #else
+                if( pxEventList == &xPendingReadyList )
+            #endif
             {
                 /* The task has been placed on the pending ready list, so its
                  * state is eReady regardless of what list the task's state list
@@ -2718,7 +2894,11 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
             }
 
             #if ( INCLUDE_vTaskSuspend == 1 )
-                else if( pxStateList == &xSuspendedTaskList )
+                #if ( configENABLE_DOMAINS == 1 )
+                    else if( pxStateList == &xSuspendedTaskList[ pxCurrentDomain->uxDomainID ] )
+                #else
+                    else if( pxStateList == &xSuspendedTaskList )
+                #endif
                 {
                     /* The task being queried is referenced from the suspended
                      * list.  Is it genuinely suspended or is it blocked
@@ -2759,7 +2939,11 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
             #endif /* if ( INCLUDE_vTaskSuspend == 1 ) */
 
             #if ( INCLUDE_vTaskDelete == 1 )
-                else if( ( pxStateList == &xTasksWaitingTermination ) || ( pxStateList == NULL ) )
+                #if ( configENABLE_DOMAINS == 1 )
+                    else if( ( pxStateList == &xTasksWaitingTermination[ pxCurrentDomain->uxDomainID ] ) || ( pxStateList == NULL ) )
+                #else
+                    else if( ( pxStateList == &xTasksWaitingTermination ) || ( pxStateList == NULL ) )
+                #endif
                 {
                     /* The task being queried is referenced from the deleted
                      * tasks list, or it is not referenced from any lists at
@@ -3103,7 +3287,11 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
                  * nothing more than change its priority variable. However, if
                  * the task is in a ready list it needs to be removed and placed
                  * in the list appropriate to its new priority. */
-                if( listIS_CONTAINED_WITHIN( &( pxReadyTasksLists[ uxPriorityUsedOnEntry ] ), &( pxTCB->xStateListItem ) ) != pdFALSE )
+                #if ( configENABLE_DOMAINS == 1 )
+                    if( listIS_CONTAINED_WITHIN( &( pxReadyTasksLists[ uxPriorityUsedOnEntry ][ pxCurrentDomain->uxDomainID ] ), &( pxTCB->xStateListItem ) ) != pdFALSE )
+                #else
+                    if( listIS_CONTAINED_WITHIN( &( pxReadyTasksLists[ uxPriorityUsedOnEntry ] ), &( pxTCB->xStateListItem ) ) != pdFALSE )
+                #endif
                 {
                     /* The task is currently in its ready list - remove before
                      * adding it to its new ready list.  As we are in a critical
@@ -3113,14 +3301,22 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
                         /* It is known that the task is in its ready list so
                          * there is no need to check again and the port level
                          * reset macro can be called directly. */
-                        portRESET_READY_PRIORITY( uxPriorityUsedOnEntry, uxTopReadyPriority );
+                        #if ( configENABLE_DOMAINS == 1 )
+                            portRESET_READY_PRIORITY( uxPriorityUsedOnEntry, uxTopReadyPriority[ pxCurrentDomain->uxDomainID ] );
+                        #else
+                            portRESET_READY_PRIORITY( uxPriorityUsedOnEntry, uxTopReadyPriority );
+                        #endif
                     }
                     else
                     {
                         mtCOVERAGE_TEST_MARKER();
                     }
 
-                    prvAddTaskToReadyList( pxTCB );
+                    #if ( configENABLE_DOMAINS == 1 )
+                        prvAddTaskToReadyList( pxTCB, pxCurrentDomain->uxDomainID );
+                    #else
+                        prvAddTaskToReadyList( pxTCB );
+                    #endif
                 }
                 else
                 {
@@ -3349,7 +3545,11 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
                 mtCOVERAGE_TEST_MARKER();
             }
 
-            vListInsertEnd( &xSuspendedTaskList, &( pxTCB->xStateListItem ) );
+            #if ( configENABLE_DOMAINS == 1 )
+                vListInsertEnd( &xSuspendedTaskList[ pxCurrentDomain->uxDomainID ], &( pxTCB->xStateListItem ) );
+            #else
+                vListInsertEnd( &xSuspendedTaskList, &( pxTCB->xStateListItem ) );
+            #endif
 
             #if ( configUSE_TASK_NOTIFICATIONS == 1 )
             {
@@ -3376,7 +3576,11 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
              * be on the ready list. */
             #if ( configNUMBER_OF_CORES > 1 )
             {
-                if( xSchedulerRunning != pdFALSE )
+                #if ( configENABLE_DOMAINS == 1 )
+                    if( xSchedulerRunning[ pxCurrentDomain->uxDomainID ] != pdFALSE )
+                #else
+                    if( xSchedulerRunning != pdFALSE )
+                #endif
                 {
                     /* Reset the next expected unblock time in case it referred to the
                      * task that is now in the Suspended state. */
@@ -3387,7 +3591,11 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
                         if( pxTCB->xTaskRunState == ( BaseType_t ) portGET_CORE_ID() )
                         {
                             /* The current task has just been suspended. */
-                            configASSERT( uxSchedulerSuspended == 0 );
+                            #if ( configENABLE_DOMAINS == 1 )
+                                configASSERT( uxSchedulerSuspended[ pxCurrentDomain->uxDomainID ] == 0 );
+                            #else
+                                configASSERT( uxSchedulerSuspended == 0 );
+                            #endif
                             vTaskYieldWithinAPI();
                         }
                         else
@@ -3413,7 +3621,11 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
         {
             UBaseType_t uxCurrentListLength;
 
-            if( xSchedulerRunning != pdFALSE )
+            #if ( configENABLE_DOMAINS == 1 )
+                if( xSchedulerRunning[ pxCurrentDomain->uxDomainID ] != pdFALSE )
+            #else
+                if( xSchedulerRunning != pdFALSE )
+            #endif
             {
                 /* Reset the next expected unblock time in case it referred to the
                  * task that is now in the Suspended state. */
@@ -3430,10 +3642,18 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
 
             if( pxTCB == pxCurrentTCB )
             {
-                if( xSchedulerRunning != pdFALSE )
+                #if ( configENABLE_DOMAINS == 1 )
+                    if( xSchedulerRunning[ pxCurrentDomain->uxDomainID ] != pdFALSE )
+                #else
+                    if( xSchedulerRunning != pdFALSE )
+                #endif
                 {
                     /* The current task has just been suspended. */
-                    configASSERT( uxSchedulerSuspended == 0 );
+                    #if ( configENABLE_DOMAINS == 1 )
+                        configASSERT( uxSchedulerSuspended[ pxCurrentDomain->uxDomainID ] == 0 );
+                    #else
+                        configASSERT( uxSchedulerSuspended == 0 );
+                    #endif
                     portYIELD_WITHIN_API();
                 }
                 else
@@ -3445,9 +3665,13 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
                     /* Use a temp variable as a distinct sequence point for reading
                      * volatile variables prior to a comparison to ensure compliance
                      * with MISRA C 2012 Rule 13.2. */
-                    uxCurrentListLength = listCURRENT_LIST_LENGTH( &xSuspendedTaskList );
+                    #if ( configENABLE_DOMAINS == 1 )
+                        uxCurrentListLength = listCURRENT_LIST_LENGTH( &xSuspendedTaskList[ pxCurrentDomain->uxDomainID ] );
+                    #else
+                        uxCurrentListLength = listCURRENT_LIST_LENGTH( &xSuspendedTaskList );
+                    #endif
 
-                    if( uxCurrentListLength == uxCurrentNumberOfTasks )
+                    if( uxCurrentListLength == uxCurrentNumberOfTasks[pxCurrentDomain->uxDomainID] )
                     {
                         /* No other tasks are ready, so set pxCurrentTCB back to
                          * NULL so when the next task is created pxCurrentTCB will
@@ -3488,7 +3712,7 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
         configASSERT( xTask );
 
         /* Is the task being resumed actually in the suspended list? */
-        if( listIS_CONTAINED_WITHIN( &xSuspendedTaskList, &( pxTCB->xStateListItem ) ) != pdFALSE )
+        if( listIS_CONTAINED_WITHIN( &xSuspendedTaskList[pxCurrentDomain->uxDomainID], &( pxTCB->xStateListItem ) ) != pdFALSE )
         {
             /* Has the task already been resumed from within an ISR? */
             if( listIS_CONTAINED_WITHIN( &xPendingReadyList, &( pxTCB->xEventListItem ) ) == pdFALSE )
@@ -3967,8 +4191,20 @@ void vTaskStartScheduler( void )
         }
         #endif
 
-        xNextTaskUnblockTime = portMAX_DELAY;
-        xSchedulerRunning = pdTRUE;
+        #if ( configENABLE_DOMAINS == 1 )
+        {
+            for( UBaseType_t uxDomain = 0; uxDomain < configNUM_TIME_SLICES; uxDomain++ )
+            {
+                xNextTaskUnblockTime[ uxDomain ] = portMAX_DELAY;
+                xSchedulerRunning[ uxDomain ] = pdTRUE;
+            }
+        }
+        #else
+        {
+            xNextTaskUnblockTime = portMAX_DELAY;
+            xSchedulerRunning = pdTRUE;
+        }
+        #endif
         xTickCount = ( TickType_t ) configINITIAL_TICK_COUNT;
 
         /* If configGENERATE_RUN_TIME_STATS is defined then the following
@@ -4050,7 +4286,18 @@ void vTaskEndScheduler( void )
      * routine so the original ISRs can be restored if necessary.  The port
      * layer must ensure interrupts enable  bit is left in the correct state. */
     portDISABLE_INTERRUPTS();
-    xSchedulerRunning = pdFALSE;
+    #if ( configENABLE_DOMAINS == 1 )
+    {
+        for( UBaseType_t uxDomain = 0; uxDomain < configNUM_TIME_SLICES; uxDomain++ )
+        {
+            xSchedulerRunning[ uxDomain ] = pdFALSE;
+        }
+    }
+    #else
+    {
+        xSchedulerRunning = pdFALSE;
+    }
+    #endif
 
     /* This function must be called from a task and the application is
      * responsible for deleting that task after the scheduler is stopped. */
@@ -4098,7 +4345,15 @@ void vTaskSuspendAll( void )
 
         /* The scheduler is suspended if uxSchedulerSuspended is non-zero.  An increment
          * is used to allow calls to vTaskSuspendAll() to nest. */
-        uxSchedulerSuspended = ( UBaseType_t ) ( uxSchedulerSuspended + 1U );
+        #if ( configENABLE_DOMAINS == 1 )
+        {
+            uxSchedulerSuspended[ pxCurrentDomain->uxDomainID ] = ( UBaseType_t ) ( uxSchedulerSuspended[ pxCurrentDomain->uxDomainID ] + 1U );
+        }
+        #else
+        {
+            uxSchedulerSuspended = ( UBaseType_t ) ( uxSchedulerSuspended + 1U );
+        }
+        #endif
 
         /* Enforces ordering for ports and optimised compilers that may otherwise place
          * the above increment elsewhere. */
@@ -4233,6 +4488,159 @@ void vTaskSuspendAll( void )
 
 #endif /* configUSE_TICKLESS_IDLE */
 /*----------------------------------------------------------*/
+
+#if ( configENABLE_DOMAINS == 1 )
+
+BaseType_t xTaskResumeAll( void )
+{
+    TCB_t * pxTCB = NULL;
+    BaseType_t xAlreadyYielded = pdFALSE;
+
+    traceENTER_xTaskResumeAll();
+
+    #if ( configNUMBER_OF_CORES > 1 )
+        if( xSchedulerRunning != pdFALSE )
+    #endif
+    {
+        /* It is possible that an ISR caused a task to be removed from an event
+         * list while the scheduler was suspended.  If this was the case then the
+         * removed task will have been added to the xPendingReadyList.  Once the
+         * scheduler has been resumed it is safe to move all the pending ready
+         * tasks from this list into their appropriate ready list. */
+        taskENTER_CRITICAL();
+        {
+            const BaseType_t xCoreID = ( BaseType_t ) portGET_CORE_ID();
+
+            /* If uxSchedulerSuspended is zero then this function does not match a
+             * previous call to vTaskSuspendAll(). */
+            configASSERT( uxSchedulerSuspended[pxCurrentDomain->uxDomainID] != 0U );
+
+            
+            uxSchedulerSuspended = ( UBaseType_t ) ( uxSchedulerSuspended[pxCurrentDomain->uxDomainID] - 1U );
+            portRELEASE_TASK_LOCK( xCoreID );
+
+            if( uxSchedulerSuspended[pxCurrentDomain->uxDomainID] == ( UBaseType_t ) 0U )
+            {
+                if( uxCurrentNumberOfTasks[pxCurrentDomain->uxDomainID] > ( UBaseType_t ) 0U )
+                {
+                    /* Move any readied tasks from the pending list into the
+                     * appropriate ready list. */
+                    while( listLIST_IS_EMPTY( &xPendingReadyList[pxCurrentDomain->uxDomainID] ) == pdFALSE )
+                    {
+                        /* MISRA Ref 11.5.3 [Void pointer assignment] */
+                        /* More details at: https://github.com/FreeRTOS/FreeRTOS-Kernel/blob/main/MISRA.md#rule-115 */
+                        /* coverity[misra_c_2012_rule_11_5_violation] */
+                        pxTCB = listGET_OWNER_OF_HEAD_ENTRY( ( &xPendingReadyList[pxCurrentDomain->uxDomainID] ) );
+                        listREMOVE_ITEM( &( pxTCB->xEventListItem ) );
+                        portMEMORY_BARRIER();
+                        listREMOVE_ITEM( &( pxTCB->xStateListItem ) );
+                        prvAddTaskToReadyList( pxTCB );
+
+                        #if ( configNUMBER_OF_CORES == 1 )
+                        {
+                            /* If the moved task has a priority higher than the current
+                             * task then a yield must be performed. */
+                            if( pxTCB->uxPriority > pxCurrentTCB->uxPriority )
+                            {
+                                xYieldPendings[ xCoreID ][pxCurrentDomain->uxDomainID] = pdTRUE;
+                            }
+                            else
+                            {
+                                mtCOVERAGE_TEST_MARKER();
+                            }
+                        }
+                        #else /* #if ( configNUMBER_OF_CORES == 1 ) */
+                        {
+                            /* All appropriate tasks yield at the moment a task is added to xPendingReadyList.
+                             * If the current core yielded then vTaskSwitchContext() has already been called
+                             * which sets xYieldPendings for the current core to pdTRUE. */
+                        }
+                        #endif /* #if ( configNUMBER_OF_CORES == 1 ) */
+                    }
+
+                    if( pxTCB != NULL )
+                    {
+                        /* A task was unblocked while the scheduler was suspended,
+                         * which may have prevented the next unblock time from being
+                         * re-calculated, in which case re-calculate it now.  Mainly
+                         * important for low power tickless implementations, where
+                         * this can prevent an unnecessary exit from low power
+                         * state. */
+                        prvResetNextTaskUnblockTime();
+                    }
+
+                    /* If any ticks occurred while the scheduler was suspended then
+                     * they should be processed now.  This ensures the tick count does
+                     * not  slip, and that any delayed tasks are resumed at the correct
+                     * time.
+                     *
+                     * It should be safe to call xTaskIncrementTick here from any core
+                     * since we are in a critical section and xTaskIncrementTick itself
+                     * protects itself within a critical section. Suspending the scheduler
+                     * from any core causes xTaskIncrementTick to increment uxPendedCounts. */
+                    {
+                        TickType_t xPendedCounts = xPendedTicks[pxCurrentDomain->uxDomainID]; /* Non-volatile copy. */
+
+                        if( xPendedCounts > ( TickType_t ) 0U )
+                        {
+                            do
+                            {
+                                if( xTaskIncrementTick() != pdFALSE )
+                                {
+                                    /* Other cores are interrupted from
+                                     * within xTaskIncrementTick(). */
+                                    xYieldPendings[ xCoreID ][pxCurrentDomain->uxDomainID] = pdTRUE;
+                                }
+                                else
+                                {
+                                    mtCOVERAGE_TEST_MARKER();
+                                }
+
+                                --xPendedCounts;
+                            } while( xPendedCounts > ( TickType_t ) 0U );
+
+                            xPendedTicks[pxCurrentDomain->uxDomainID] = 0;
+                        }
+                        else
+                        {
+                            mtCOVERAGE_TEST_MARKER();
+                        }
+                    }
+
+                    if( xYieldPendings[ xCoreID ][pxCurrentDomain->uxDomainID] != pdFALSE )
+                    {
+                        #if ( configUSE_PREEMPTION != 0 )
+                        {
+                            xAlreadyYielded = pdTRUE;
+                        }
+                        #endif /* #if ( configUSE_PREEMPTION != 0 ) */
+
+                        #if ( configNUMBER_OF_CORES == 1 )
+                        {
+                            taskYIELD_TASK_CORE_IF_USING_PREEMPTION( pxCurrentTCB );
+                        }
+                        #endif /* #if ( configNUMBER_OF_CORES == 1 ) */
+                    }
+                    else
+                    {
+                        mtCOVERAGE_TEST_MARKER();
+                    }
+                }
+            }
+            else
+            {
+                mtCOVERAGE_TEST_MARKER();
+            }
+        }
+        taskEXIT_CRITICAL();
+    }
+
+    traceRETURN_xTaskResumeAll( xAlreadyYielded );
+
+    return xAlreadyYielded;
+}
+
+#else
 
 BaseType_t xTaskResumeAll( void )
 {
@@ -4381,6 +4789,10 @@ BaseType_t xTaskResumeAll( void )
 
     return xAlreadyYielded;
 }
+
+#endif
+
+
 /*-----------------------------------------------------------*/
 
 TickType_t xTaskGetTickCount( void )
@@ -6333,49 +6745,48 @@ static portTASK_FUNCTION( prvIdleTask, pvParameters )
 /*-----------------------------------------------------------*/
 
 #if ( configENABLE_DOMAINS == 1)
+
 static void prvInitialiseTaskLists( void )
 {
-    for (UBaseType_t uxDomain = 0; uxDomain < configNUM_TIME_SLICES; uxDomain++) {
-        UBaseType_t uxPriority;
-
-        for( uxPriority = ( UBaseType_t ) 0U; uxPriority < ( UBaseType_t ) configMAX_PRIORITIES; uxPriority++ )
-        {
-            vListInitialise( &( pxReadyTasksLists[ uxPriority ][ uxDomain ] ) );
-        }
-
-        vListInitialise(&(xDelayedTaskList1[uxDomain]));
-        vListInitialise(&(xDelayedTaskList2[uxDomain]));
-        vListInitialise(&(xPendingReadyList[uxDomain]));
-
-
-        #if (INCLUDE_vTaskDelete == 1)
-        {
-            vListInitialise(&(xTasksWaitingTermination[uxDomain]));
-            uxDeletedTasksWaitingCleanUp[uxDomain] = (UBaseType_t) 0U;
-        }
-        #endif /* INCLUDE_vTaskDelete */
-
-        #if ( INCLUDE_vTaskSuspend == 1 )
-        {
-            vListInitialise(&(xSuspendedTaskList[uxDomain]));
-        }
-        #endif /* INCLUDE_vTaskSuspend */
-
-        uxTopReadyPriority[uxDomain] = tskIDLE_PRIORITY;
-        xSchedulerRunning[uxDomain] = pdFALSE;
-        uxSchedulerSuspended[uxDomain] = (UBaseType_t) 0U;
-        xNextTaskUnblockTime[uxDomain] = portMAX_DELAY;
-        
-        for (BaseType_t xCore = 0; xCore < configNUMBER_OF_CORES; xCore++) {
-            xYieldPendings[xCore][uxDomain] = pdFALSE;
-        }
-
-        /* Start with pxDelayedTaskList using list1 and the pxOverflowDelayedTaskList
-         * using list2. */
-        pxDelayedTaskList[uxDomain] = &xDelayedTaskList1[uxDomain];
-        pxOverflowDelayedTaskList[uxDomain] = &xDelayedTaskList2[uxDomain];
+    UBaseType_t uxDomain = pxCurrentDomain->uxDomainID;
+    for( uxPriority = ( UBaseType_t ) 0U; uxPriority < ( UBaseType_t ) configMAX_PRIORITIES; uxPriority++ )
+    {
+        vListInitialise( &( pxReadyTasksLists[ uxPriority ][ uxDomain ] ) );
     }
+
+    vListInitialise(&(xDelayedTaskList1[uxDomain]));
+    vListInitialise(&(xDelayedTaskList2[uxDomain]));
+    vListInitialise(&(xPendingReadyList[uxDomain]));
+
+
+    #if (INCLUDE_vTaskDelete == 1)
+    {
+        vListInitialise(&(xTasksWaitingTermination[uxDomain]));
+        uxDeletedTasksWaitingCleanUp[uxDomain] = (UBaseType_t) 0U;
+    }
+    #endif /* INCLUDE_vTaskDelete */
+
+    #if ( INCLUDE_vTaskSuspend == 1 )
+    {
+        vListInitialise(&(xSuspendedTaskList[uxDomain]));
+    }
+    #endif /* INCLUDE_vTaskSuspend */
+
+    uxTopReadyPriority[uxDomain] = tskIDLE_PRIORITY;
+    xSchedulerRunning[uxDomain] = pdFALSE;
+    uxSchedulerSuspended[uxDomain] = (UBaseType_t) 0U;
+    xNextTaskUnblockTime[uxDomain] = portMAX_DELAY;
+    
+    for (BaseType_t xCore = 0; xCore < configNUMBER_OF_CORES; xCore++) {
+        xYieldPendings[xCore][uxDomain] = pdFALSE;
+    }
+
+    /* Start with pxDelayedTaskList using list1 and the pxOverflowDelayedTaskList
+     * using list2. */
+    pxDelayedTaskList[uxDomain] = &xDelayedTaskList1[uxDomain];
+    pxOverflowDelayedTaskList[uxDomain] = &xDelayedTaskList2[uxDomain];
 }
+
 #else
 
 static void prvInitialiseTaskLists( void )
@@ -8899,8 +9310,17 @@ static void prvAddCurrentTaskToDelayedList( TickType_t xTicksToWait,
 {
     TickType_t xTimeToWake;
     const TickType_t xConstTickCount = xTickCount;
-    List_t * const pxDelayedList = pxDelayedTaskList;
-    List_t * const pxOverflowDelayedList = pxOverflowDelayedTaskList;
+    #if ( configENABLE_DOMAINS == 1 )
+        List_t * const pxDelayedList = pxDelayedTaskList[pxCurrentDomain->uxDomainID];
+        List_t * const pxOverflowDelayedList = pxOverflowDelayedTaskList[pxCurrentDomain->uxDomainID];
+        List_t * const xSuspendedTaskList = &xSuspendedTaskList[pxCurrentDomain->uxDomainID];
+        UBaseType_t uxTopReadyPriority = &uxTopReadyPriority[pxCurrentDomain->uxDomainID];
+    #else
+        List_t * const pxDelayedList = pxDelayedTaskList;
+        List_t * const pxOverflowDelayedList = pxOverflowDelayedTaskList;
+        List_t * const xSuspendedTaskList = &xSuspendedTaskList;
+        UBaseType_t uxTopReadyPriority = &uxTopReadyPriority;
+    #endif
 
     #if ( INCLUDE_xTaskAbortDelay == 1 )
     {
@@ -8931,7 +9351,7 @@ static void prvAddCurrentTaskToDelayedList( TickType_t xTicksToWait,
             /* Add the task to the suspended task list instead of a delayed task
              * list to ensure it is not woken by a timing event.  It will block
              * indefinitely. */
-            listINSERT_END( &xSuspendedTaskList, &( pxCurrentTCB->xStateListItem ) );
+            listINSERT_END( xSuspendedTaskList, &( pxCurrentTCB->xStateListItem ) );
         }
         else
         {
@@ -8960,14 +9380,25 @@ static void prvAddCurrentTaskToDelayedList( TickType_t xTicksToWait,
                 /* If the task entering the blocked state was placed at the
                  * head of the list of blocked tasks then xNextTaskUnblockTime
                  * needs to be updated too. */
-                if( xTimeToWake < xNextTaskUnblockTime )
-                {
-                    xNextTaskUnblockTime = xTimeToWake;
-                }
-                else
-                {
-                    mtCOVERAGE_TEST_MARKER();
-                }
+                #if configENABLE_DOMAINS
+                    if( xTimeToWake < xNextTaskUnblockTime[pxCurrentDomain->uxDomainID] )
+                    {
+                        xNextTaskUnblockTime[pxCurrentDomain->uxDomainID] = xTimeToWake;
+                    }
+                    else
+                    {
+                        mtCOVERAGE_TEST_MARKER();
+                    }
+                #else
+                    if( xTimeToWake < xNextTaskUnblockTime )
+                    {
+                        xNextTaskUnblockTime = xTimeToWake;
+                    }
+                    else
+                    {
+                        mtCOVERAGE_TEST_MARKER();
+                    }
+                #endif
             }
         }
     }
@@ -9125,6 +9556,62 @@ static void prvAddCurrentTaskToDelayedList( TickType_t xTicksToWait,
  * This function must be called by the application before restarting the
  * scheduler.
  */
+#if ( configENABLE_DOMAINS == 1 )
+
+void vTaskResetState( void )
+{
+    BaseType_t xCoreID;
+
+    /* Task control block. */
+    #if ( configNUMBER_OF_CORES == 1 )
+    {
+        pxCurrentTCB = NULL;
+    }
+    #endif /* #if ( configNUMBER_OF_CORES == 1 ) */
+
+    #if ( INCLUDE_vTaskDelete == 1 )
+    {
+        uxDeletedTasksWaitingCleanUp[pxCurrentDomain->uxDomainID] = ( UBaseType_t ) 0U;
+    }
+    #endif /* #if ( INCLUDE_vTaskDelete == 1 ) */
+
+    #if ( configUSE_POSIX_ERRNO == 1 )
+    {
+        FreeRTOS_errno = 0;
+    }
+    #endif /* #if ( configUSE_POSIX_ERRNO == 1 ) */
+
+    /* Other file private variables. */
+    uxCurrentNumberOfTasks[pxCurrentDomain->uxDomainID] = ( UBaseType_t ) 0U;
+    xTickCount = ( TickType_t ) configINITIAL_TICK_COUNT;
+    uxTopReadyPriority[pxCurrentDomain->uxDomainID] = tskIDLE_PRIORITY;
+    xSchedulerRunning[pxCurrentDomain->uxDomainID] = pdFALSE;
+    xPendedTicks[pxCurrentDomain->uxDomainID] = ( TickType_t ) 0U;
+
+    for( xCoreID = 0; xCoreID < configNUMBER_OF_CORES; xCoreID++ )
+    {
+        xYieldPendings[ xCoreID ][pxCurrentDomain->uxDomainID] = pdFALSE;
+    }
+
+    xNumOfOverflows[pxCurrentDomain->uxDomainID] = ( BaseType_t ) 0;
+    uxTaskNumber[pxCurrentDomain->uxDomainID] = ( UBaseType_t ) 0U;
+    xNextTaskUnblockTime[pxCurrentDomain->uxDomainID] = ( TickType_t ) 0U;
+
+    uxSchedulerSuspended[pxCurrentDomain->uxDomainID] = ( UBaseType_t ) 0U;
+
+    #if ( configGENERATE_RUN_TIME_STATS == 1 )
+    {
+        for( xCoreID = 0; xCoreID < configNUMBER_OF_CORES; xCoreID++ )
+        {
+            ulTaskSwitchedInTime[ xCoreID ] = 0U;
+            ulTotalRunTime[ xCoreID ] = 0U;
+        }
+    }
+    #endif /* #if ( configGENERATE_RUN_TIME_STATS == 1 ) */
+}
+
+#else
+
 void vTaskResetState( void )
 {
     BaseType_t xCoreID;
@@ -9176,4 +9663,6 @@ void vTaskResetState( void )
     }
     #endif /* #if ( configGENERATE_RUN_TIME_STATS == 1 ) */
 }
+
+#endif
 /*-----------------------------------------------------------*/
