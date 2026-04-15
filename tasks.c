@@ -4206,6 +4206,7 @@ static BaseType_t prvCreateIdleTasks( void )
                 if (ulSliceOffset + ulSliceLength < uxParentLength) {
                     xDomains[uxParentStart].uxLength = uxNextDomainSlot - uxParentStart;
                     xDomains[uxNextDomainSlot + ulSliceLength] = ( domDB ) {
+                        .uxDomainID = xDomains[uxParentStart].uxDomainID, // Same domain id even when split
                         .uxStart = uxNextDomainSlot + ulSliceLength,
                         .uxLength = uxParentLength - xDomains[uxParentStart].uxLength - ulSliceLength
                     };
@@ -4261,6 +4262,12 @@ void vTaskStartScheduler( void )
         #ifdef FREERTOS_TASKS_C_ADDITIONS_INIT
         {
             freertos_tasks_c_additions_init();
+        }
+        #endif
+
+        #if ( configENABLE_DOMAINS == 1 )
+        {
+            prvInitializeDomains();
         }
         #endif
 
@@ -5755,9 +5762,15 @@ BaseType_t xTaskCatchUpTicks( TickType_t xTicksToCatchUp )
             xDomainTick = xConstTickCount;
 
             /* Time slot expired */
-            if (xDomainTick > pxCurrentDomain->uxStart + pxCurrentDomain->uxLength) {
+            if (xDomainTick >= pxCurrentDomain->uxStart + pxCurrentDomain->uxLength) {
+                /* Save the current task in the old domain */
+                pxCurrentDomain->pxPreviousTCB = pxCurrentTCB;
+
                 xSwitchRequired = pdTRUE;
                 pxCurrentDomain = &xDomains[xDomainTick];
+
+                /* Restore the previous task for the new domain, or NULL if never run */
+                pxCurrentTCB = pxCurrentDomain->pxPreviousTCB;
 
                 /* Flush on domain switch */
                 temporal_fence_t();
@@ -6202,6 +6215,17 @@ BaseType_t xTaskCatchUpTicks( TickType_t xTicksToCatchUp )
     {
         traceENTER_vTaskSwitchContext();
         #if ( configENABLE_DOMAINS == 1 )
+            if( pxCurrentTCB == NULL )
+            {
+                /* Domain has never run, select from ready lists */
+                taskSELECT_HIGHEST_PRIORITY_TASK();
+                if( pxCurrentTCB == NULL )
+                {
+                    /* No tasks ready in this domain, use idle task */
+                    pxCurrentTCB = xIdleTaskHandles[ 0 ];
+                }
+            }
+
             UBaseType_t uxCurrentDomainID = pxCurrentDomain->uxDomainID;
             if( uxSchedulerSuspended[ uxCurrentDomainID ] != ( UBaseType_t ) 0U )
             {
