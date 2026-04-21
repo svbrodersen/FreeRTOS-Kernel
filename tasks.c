@@ -642,38 +642,49 @@ static const volatile UBaseType_t uxTopUsedPriority = configMAX_PRIORITIES - 1U;
  * from either an ISR or a task. */
 PRIVILEGED_DATA static volatile UBaseType_t uxSchedulerSuspended[configNUM_TIME_SLICES] = { ( UBaseType_t ) 0U };
 
-typedef struct domDomainBlock {
+typedef struct DomainBlock {
   UBaseType_t uxDomainID; /* This time slices domain ID */
   size_t uxLength; /* Length of this domain */
-} domDB;
+} DomainBlock_t;
 
 /* Timeline over configNUM_TIME_SLICES, indexed by the start of a block */
-PRIVILEGED_DATA static domDB xDomains[configNUM_TIME_SLICES] = {
+PRIVILEGED_DATA static DomainBlock_t xDomains[configNUM_TIME_SLICES] = {
     [0] = {.uxDomainID = 0, .uxLength = configNUM_TIME_SLICES}
 };
 
-typedef struct domLISTITEM {
+typedef struct DomainListItem {
     size_t uxBlockStart;
-    struct domLISTITEM* next;
-} domITEM;
+    struct DomainListItem* next;
+} DomainListItem_t;
 
-PRIVILEGED_DATA static domITEM xDomainItemPool[configNUM_TIME_SLICES] = {
+PRIVILEGED_DATA static DomainListItem_t xDomainItemPool[configNUM_TIME_SLICES] = {
     [0] = {.uxBlockStart = 0, .next = NULL}
 };
 
 typedef struct DomainInfo {
     TCB_t * volatile pxPreviousTCB;
-    domITEM * pxFirstBlock;  /* Singly-linked list of this domain's owned blocks */
-} domINFO
+    DomainListItem_t * pxFirstBlock;  /* Singly-linked list of this domain's owned blocks */
+} DomainInfo_t;
 
 /* Timeline over Domain information indexed by the Domain ID */
-PRIVILEGED_DATA static DomainInfo xDomainInfo[configNUM_TIME_SLICES] = {
-    [0] = {.pxPreviousTCB = NULL, .pxFirstBlock = xDomainItemPool[0]}
+PRIVILEGED_DATA static DomainInfo_t xDomainInfo[configNUM_TIME_SLICES] = {
+    [0] = {.pxPreviousTCB = NULL, .pxFirstBlock = &xDomainItemPool[0]}
 };
 
 PRIVILEGED_DATA static size_t pxCurrentDomainIndex = 0;
 
 PRIVILEGED_DATA static volatile TickType_t xDomainTick = ( TickType_t ) 0;
+
+PRIVILEGED_DATA static UBaseType_t uxNextFreeItem = 1;
+
+static DomainListItem_t * pxAllocateBlockItem( void )
+{
+    if( uxNextFreeItem >= configNUM_TIME_SLICES )
+    {
+        return NULL;
+    }
+    return &( xDomainItemPool[ uxNextFreeItem++ ] );
+}
 
 PRIVILEGED_DATA static volatile UBaseType_t uxNextDomainID = 1;
 
@@ -1845,11 +1856,11 @@ static void prvAddNewTaskToReadyList( TCB_t * pxNewTCB ) PRIVILEGED_FUNCTION;
         traceENTER_xTaskCreateRestricted( pxTaskDefinition, pxCreatedTask );
 
         #if ( configENABLE_DOMAINS == 1 )
-            domDB* pxTargetDomain;
+            DomainBlock_t* pxTargetDomain;
             UBaseType_t uxNewDomainSlot;
 
             if (pxTaskDefinition->pxDomainParameters == NULL) {
-                pxTargetDomain = xDomains[pxCurrentDomainIndex];
+                pxTargetDomain = &xDomains[pxCurrentDomainIndex];
             } else {
                 xReturn = prvCreateDomain(pxTaskDefinition->pxDomainParameters, &uxNewDomainSlot);
                 if (xReturn != pdPASS) {
@@ -2209,7 +2220,7 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
     pxNewTCB->uxPriority = uxPriority;
     #if ( configENABLE_DOMAINS == 1 )
     {
-        pxNewTCB.uxDomainID = xDomains[pxCurrentDomainIndex].uxDomainID;
+        pxNewTCB->uxDomainID = xDomains[pxCurrentDomainIndex].uxDomainID;
     }
     #endif
     #if ( configUSE_MUTEXES == 1 )
@@ -4206,56 +4217,118 @@ static BaseType_t prvCreateIdleTasks( void )
 #if ( configENABLE_DOMAINS == 1 )
     static void temporal_fence_t(void);
 
-    static BaseType_t prvCreateDomain(DomainParameters_t* pxParams, UBaseType_t * puxNewDomainSlot) {
-
+    static BaseType_t prvCreateDomain(DomainParameters_t* pxParams,
+                                      UBaseType_t * puxNewDomainSlot)
+    {
         uint32_t ulSliceOffset = pxParams->ulSliceOffset;
         uint32_t ulSliceLength = pxParams->ulSliceLength;
 
-        BaseType_t xReturn;
-
         if (ulSliceLength == 0) {
-            return pdFAIL; // Must have at least one time slice
+            return pdFAIL;
         }
 
         taskENTER_CRITICAL();
-        {
-            size_t uxParentStart = pxCurrentDomainIndex;
-            size_t uxParentLength = xDomains[pxCurrentDomainIndex]->uxLength;
 
-            // Check offset and length are within parent domain
-            if (ulSliceOffset + ulSliceLength > uxParentLength) {
-                xReturn = pdFALSE; // Requested slices exceed parent domain
-            } else {
-                UBaseType_t uxNextDomainSlot = uxParentStart + ulSliceOffset;
+        UBaseType_t uxCurrentDomainID = xDomains[pxCurrentDomainIndex].uxDomainID;
+        DomainInfo_t * pxCurrentInfo = &xDomainInfo[uxCurrentDomainID];
 
-                // Sanity check, should never happen, TODO: remove this after testing
-                if (uxNextDomainSlot >= configNUM_TIME_SLICES) {
-                    exit(1);
-                }
+        DomainListItem_t * pxBlock = pxCurrentInfo->pxFirstBlock;
+        DomainListItem_t * pxPrev = NULL;
 
-                xDomains[uxNextDomainSlot].uxDomainID = uxNextDomainID;
-                xDomains[uxNextDomainSlot].uxLength = ulSliceLength;
-                xDomains[uxNextDomainSlot].pxPreviousTCB = NULL;
+        while (pxBlock != NULL) {
+            size_t blockStart = pxBlock->uxBlockStart;
+            size_t blockEnd = blockStart + xDomains[blockStart].uxLength;
 
-                // Possibly split parent domain, we now have a non-contingous size for the parent.
-                if (ulSliceOffset + ulSliceLength < uxParentLength) {
-                    xDomains[uxParentStart].uxLength = uxNextDomainSlot - uxParentStart;
-                    xDomains[uxNextDomainSlot + ulSliceLength] = ( domDB ) {
-                        .uxDomainID = xDomains[uxParentStart].uxDomainID, // Same domain id even when split
-                        .uxLength = uxParentLength - xDomains[uxParentStart].uxLength - ulSliceLength
-                    };
-                } else {
-                    // Otherwise just reduce parent length
-                    xDomains[uxParentStart].uxLength -= ulSliceLength;
-                }
-                uxNextDomainID++;
-
-                *puxNewDomainSlot = uxNextDomainSlot;
+            if (ulSliceOffset >= blockStart &&
+                ulSliceOffset + ulSliceLength <= blockEnd) {
+                break;
             }
-        }
-        taskEXIT_CRITICAL();
 
-        return xReturn;
+            pxPrev = pxBlock;
+            pxBlock = pxBlock->next;
+        }
+
+        /* Not found */
+        if (pxBlock == NULL) {
+            taskEXIT_CRITICAL();
+            return pdFAIL;
+        }
+
+        size_t blockStart = pxBlock->uxBlockStart;
+        size_t blockEnd = blockStart + xDomains[blockStart].uxLength;
+
+        /* Reject if tick is inside range */
+        if (ulSliceOffset <= xDomainTick &&
+            xDomainTick < ulSliceOffset + ulSliceLength) {
+            taskEXIT_CRITICAL();
+            return pdFAIL;
+        }
+
+        UBaseType_t uxChildDomainID = uxNextDomainID;
+
+        /* Write child block */
+        xDomains[ulSliceOffset].uxDomainID = uxChildDomainID;
+        xDomains[ulSliceOffset].uxLength = ulSliceLength;
+
+        /* Left fragment if exists */
+        if (ulSliceOffset > blockStart) {
+            xDomains[blockStart].uxDomainID = uxCurrentDomainID;
+            xDomains[blockStart].uxLength = ulSliceOffset - blockStart;
+        }
+
+        /* Right fragment if exists*/
+        if (ulSliceOffset + ulSliceLength < blockEnd) {
+            size_t rightStart = ulSliceOffset + ulSliceLength;
+            xDomains[rightStart].uxDomainID = uxCurrentDomainID;
+            xDomains[rightStart].uxLength = blockEnd - rightStart;
+        }
+
+        /* Full block overwrite */
+        if (ulSliceOffset == blockStart &&
+            ulSliceOffset + ulSliceLength == blockEnd) {
+
+            if (pxPrev == NULL) {
+                pxCurrentInfo->pxFirstBlock = pxBlock->next;
+            } else {
+                pxPrev->next = pxBlock->next;
+            }
+
+        /* Start of block */
+        } else if (ulSliceOffset == blockStart) {
+
+            pxBlock->uxBlockStart = ulSliceOffset + ulSliceLength;
+
+        /* End of block */
+        } else if (ulSliceOffset + ulSliceLength == blockEnd) {
+
+            /* No change needed */
+
+        /* Have to split block */
+        } else {
+
+            DomainListItem_t * pxRight = pxAllocateBlockItem();
+            configASSERT(pxRight != NULL);
+
+            pxRight->uxBlockStart = ulSliceOffset + ulSliceLength;
+            pxRight->next = pxBlock->next;
+            pxBlock->next = pxRight;
+        }
+
+        /* Create child block list */
+        DomainListItem_t * pxChild = pxAllocateBlockItem();
+        configASSERT(pxChild != NULL);
+
+        pxChild->uxBlockStart = ulSliceOffset;
+        pxChild->next = NULL;
+
+        xDomainInfo[uxChildDomainID].pxPreviousTCB = NULL;
+        xDomainInfo[uxChildDomainID].pxFirstBlock = pxChild;
+
+        uxNextDomainID++;
+        *puxNewDomainSlot = ulSliceOffset;
+
+        taskEXIT_CRITICAL();
+        return pdTRUE;
     }
 #endif
 
@@ -5795,22 +5868,27 @@ BaseType_t xTaskCatchUpTicks( TickType_t xTicksToCatchUp )
             /* Update the domain tick */
             xDomainTick = xConstTickCount;
 
-            /* Time slot expired */
-            if( xDomainTick >= xDomains[pxCurrentDomainIndex + xDomains[pxCurrentDomainIndex]->uxLength 
-                    || xDomainTick < pxCurrentDomainIndex)
+            /* Time slot expired or wraparound */
+            if( xDomainTick >= pxCurrentDomainIndex + xDomains[pxCurrentDomainIndex].uxLength
+                || xDomainTick < pxCurrentDomainIndex )
             {
-                /* Save the current task in the old domain */
-                xDomains[pxCurrentDomainIndex]->pxPreviousTCB = pxCurrentTCB;
+                /* Save current task to logical domain info */
+                xDomainInfo[xDomains[pxCurrentDomainIndex].uxDomainID].pxPreviousTCB = pxCurrentTCB;
 
                 xSwitchRequired = pdTRUE;
 
                 /* Flush on domain switch */
                 temporal_fence_t();
 
-                xDomains[pxCurrentDomainIndex] = &xDomains[xDomainTick];
+                /* Contiguous partition: next block starts exactly here */
+                pxCurrentDomainIndex += xDomains[pxCurrentDomainIndex].uxLength;
+                if( pxCurrentDomainIndex >= configNUM_TIME_SLICES )
+                {
+                    pxCurrentDomainIndex = 0;
+                }
 
-                /* Restore the previous task for the new domain, or NULL if never run */
-                pxCurrentTCB = xDomains[pxCurrentDomainIndex]->pxPreviousTCB;
+                /* Restore previous task from logical domain info */
+                pxCurrentTCB = xDomainInfo[xDomains[pxCurrentDomainIndex].uxDomainID].pxPreviousTCB;
 
             }
         #endif
@@ -6584,14 +6662,14 @@ BaseType_t xTaskRemoveFromEventList( const List_t * const pxEventList )
     listREMOVE_ITEM( &( pxUnblockedTCB->xEventListItem ) );
 
     #if ( configENABLE_DOMAINS == 1 )
-        if( uxSchedulerSuspended[ pxUnblockedTCB.uxDomainID ] == ( UBaseType_t ) 0U )
+        if( uxSchedulerSuspended[ pxUnblockedTCB->uxDomainID ] == ( UBaseType_t ) 0U )
     #else
         if( uxSchedulerSuspended == ( UBaseType_t ) 0U )
     #endif
     {
         listREMOVE_ITEM( &( pxUnblockedTCB->xStateListItem ) );
         #if ( configENABLE_DOMAINS == 1 )
-            prvAddTaskToReadyListForDomain( pxUnblockedTCB, pxUnblockedTCB.uxDomainID );
+            prvAddTaskToReadyListForDomain( pxUnblockedTCB, pxUnblockedTCB->uxDomainID );
         #else
             prvAddTaskToReadyList( pxUnblockedTCB );
         #endif
@@ -6615,7 +6693,7 @@ BaseType_t xTaskRemoveFromEventList( const List_t * const pxEventList )
         /* The delayed and ready lists cannot be accessed, so hold this task
          * pending until the scheduler is resumed. */
         #if ( configENABLE_DOMAINS == 1 )
-            listINSERT_END( &( xPendingReadyList[ pxUnblockedTCB.uxDomainID ] ), &( pxUnblockedTCB->xEventListItem ) );
+            listINSERT_END( &( xPendingReadyList[ pxUnblockedTCB->uxDomainID ] ), &( pxUnblockedTCB->xEventListItem ) );
         #else
             listINSERT_END( &( xPendingReadyList ), &( pxUnblockedTCB->xEventListItem ) );
         #endif
