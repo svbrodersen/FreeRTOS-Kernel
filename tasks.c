@@ -2604,7 +2604,11 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
             /* Remove task from the ready/delayed list. */
             if( uxListRemove( &( pxTCB->xStateListItem ) ) == ( UBaseType_t ) 0 )
             {
-                taskRESET_READY_PRIORITY( pxTCB->uxPriority );
+                #if ( configENABLE_DOMAINS == 1 )
+                    portRESET_READY_PRIORITY( pxTCB->uxPriority, uxTopReadyPriority[ pxTCB->uxDomainID ] );
+                #else
+                    taskRESET_READY_PRIORITY( pxTCB->uxPriority );
+                #endif
             }
             else
             {
@@ -3602,7 +3606,11 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
              * suspended list. */
             if( uxListRemove( &( pxTCB->xStateListItem ) ) == ( UBaseType_t ) 0 )
             {
-                taskRESET_READY_PRIORITY( pxTCB->uxPriority );
+                #if ( configENABLE_DOMAINS == 1 )
+                    portRESET_READY_PRIORITY( pxTCB->uxPriority, uxTopReadyPriority[ pxTCB->uxDomainID ] );
+                #else
+                    taskRESET_READY_PRIORITY( pxTCB->uxPriority );
+                #endif
             }
             else
             {
@@ -6357,17 +6365,6 @@ BaseType_t xTaskCatchUpTicks( TickType_t xTicksToCatchUp )
     {
         traceENTER_vTaskSwitchContext();
         #if ( configENABLE_DOMAINS == 1 )
-            if( pxCurrentTCB == NULL )
-            {
-                /* Domain has never run, select from ready lists */
-                taskSELECT_HIGHEST_PRIORITY_TASK();
-                if( pxCurrentTCB == NULL )
-                {
-                    /* No tasks ready in this domain, use idle task */
-                    pxCurrentTCB = xIdleTaskHandles[ 0 ];
-                }
-            }
-
             UBaseType_t uxCurrentDomainID = xDomains[pxCurrentDomainIndex].uxDomainID;
             if( uxSchedulerSuspended[ uxCurrentDomainID ] != ( UBaseType_t ) 0U )
             {
@@ -6378,6 +6375,7 @@ BaseType_t xTaskCatchUpTicks( TickType_t xTicksToCatchUp )
             else
             {
                 xYieldPendings[ 0 ][uxCurrentDomainID] = pdFALSE;
+
         #else
             if( uxSchedulerSuspended != ( UBaseType_t ) 0U )
             {
@@ -6434,7 +6432,22 @@ BaseType_t xTaskCatchUpTicks( TickType_t xTicksToCatchUp )
             /* MISRA Ref 11.5.3 [Void pointer assignment] */
             /* More details at: https://github.com/FreeRTOS/FreeRTOS-Kernel/blob/main/MISRA.md#rule-115 */
             /* coverity[misra_c_2012_rule_11_5_violation] */
-            taskSELECT_HIGHEST_PRIORITY_TASK();
+
+            /* If the domain has no ready tasks, run the shared idle task.
+             * Otherwise select the highest priority ready task. */
+
+            #if ( configENABLE_DOMAINS == 1 )
+            if( uxTopReadyPriority[ uxCurrentDomainID ] == ( UBaseType_t ) 0U )
+            {
+                pxCurrentTCB = xIdleTaskHandles[ 0 ];
+            }
+            else
+            {
+                taskSELECT_HIGHEST_PRIORITY_TASK();
+            }
+            #else 
+                taskSELECT_HIGHEST_PRIORITY_TASK();
+            #endif
             traceTASK_SWITCHED_IN();
 
             /* Macro to inject port specific behaviour immediately after
