@@ -951,6 +951,9 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
  * under the control of the scheduler.
  */
 static void prvAddNewTaskToReadyList( TCB_t * pxNewTCB ) PRIVILEGED_FUNCTION;
+#if ( configENABLE_DOMAINS == 1 )
+    static void prvAddNewTaskToReadyListForDomain( TCB_t * pxNewTCB, UBaseType_t uxDomainID ) PRIVILEGED_FUNCTION;
+#endif
 
 /*
  * Create a task with static buffer for both TCB and stack. Returns a handle to
@@ -1856,19 +1859,17 @@ static void prvAddNewTaskToReadyList( TCB_t * pxNewTCB ) PRIVILEGED_FUNCTION;
         traceENTER_xTaskCreateRestricted( pxTaskDefinition, pxCreatedTask );
 
         #if ( configENABLE_DOMAINS == 1 )
-            DomainBlock_t* pxTargetDomain;
-            UBaseType_t uxNewDomainSlot;
+            BaseType_t xCreatedNewDomain = pdFALSE;
+            UBaseType_t uxNewDomainSlot = 0;
 
-            if (pxTaskDefinition->pxDomainParameters == NULL) {
-                pxTargetDomain = &xDomains[pxCurrentDomainIndex];
-            } else {
+            if (pxTaskDefinition->pxDomainParameters != NULL) {
                 xReturn = prvCreateDomain(pxTaskDefinition->pxDomainParameters, &uxNewDomainSlot);
                 if (xReturn != pdPASS) {
 
                         traceRETURN_xTaskCreateRestricted( xReturn );
                     return xReturn;
                 }
-                pxTargetDomain = &xDomains[uxNewDomainSlot];
+                xCreatedNewDomain = pdTRUE;
             }
         #endif
 
@@ -1882,7 +1883,19 @@ static void prvAddNewTaskToReadyList( TCB_t * pxNewTCB ) PRIVILEGED_FUNCTION;
                 pxNewTCB->uxCoreAffinityMask = configTASK_DEFAULT_CORE_AFFINITY;
             }
             #endif /* #if ( ( configNUMBER_OF_CORES > 1 ) && ( configUSE_CORE_AFFINITY == 1 ) ) */
-            prvAddNewTaskToReadyList( pxNewTCB );
+
+            #if ( configENABLE_DOMAINS == 1 )
+                if( xCreatedNewDomain == pdTRUE )
+                {
+                    UBaseType_t uxNewDomainID = xDomains[uxNewDomainSlot].uxDomainID;
+                    pxNewTCB->uxDomainID = uxNewDomainID;
+                    prvAddNewTaskToReadyListForDomain( pxNewTCB, uxNewDomainID );
+                }
+                else
+            #endif
+            {
+                prvAddNewTaskToReadyList( pxNewTCB );
+            }
 
             xReturn = pdPASS;
         }
@@ -2348,14 +2361,14 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
 
 #if ( configNUMBER_OF_CORES == 1 )
 
-    static void prvAddNewTaskToReadyList( TCB_t * pxNewTCB )
+    static void prvAddNewTaskToReadyListForDomain( TCB_t * pxNewTCB, UBaseType_t uxDomainID )
     {
         /* Ensure interrupts don't access the task lists while the lists are being
          * updated. */
         taskENTER_CRITICAL();
         {
             #if ( configENABLE_DOMAINS == 1 )
-                uxCurrentNumberOfTasks[xDomains[pxCurrentDomainIndex].uxDomainID] = ( UBaseType_t ) ( uxCurrentNumberOfTasks[xDomains[pxCurrentDomainIndex].uxDomainID] + 1U );
+                uxCurrentNumberOfTasks[uxDomainID] = ( UBaseType_t ) ( uxCurrentNumberOfTasks[uxDomainID] + 1U );
             #else
                 uxCurrentNumberOfTasks = ( UBaseType_t ) ( uxCurrentNumberOfTasks + 1U );
             #endif
@@ -2367,7 +2380,7 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
                 pxCurrentTCB = pxNewTCB;
 
             #if ( configENABLE_DOMAINS == 1 )
-                if( uxCurrentNumberOfTasks[xDomains[pxCurrentDomainIndex].uxDomainID] == ( UBaseType_t ) 1 )
+                if( uxCurrentNumberOfTasks[uxDomainID] == ( UBaseType_t ) 1 )
             #else
                 if( uxCurrentNumberOfTasks == ( UBaseType_t ) 1 )
             #endif
@@ -2388,7 +2401,7 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
                  * current task if it is the highest priority task to be created
                  * so far. */
                 #if ( configENABLE_DOMAINS == 1 )
-                    if( xSchedulerRunning[ xDomains[pxCurrentDomainIndex].uxDomainID ] == pdFALSE )
+                    if( xSchedulerRunning[uxDomainID] == pdFALSE )
                 #else
                     if( xSchedulerRunning == pdFALSE )
                 #endif
@@ -2409,7 +2422,7 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
             }
 
             #if ( configENABLE_DOMAINS == 1 )
-                uxTaskNumber[ xDomains[pxCurrentDomainIndex].uxDomainID ]++;
+                uxTaskNumber[uxDomainID]++;
             #else
                 uxTaskNumber++;
             #endif
@@ -2418,7 +2431,7 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
             {
                 /* Add a counter into the TCB for tracing only. */
                 #if ( configENABLE_DOMAINS == 1 )
-                    pxNewTCB->uxTCBNumber = uxTaskNumber[ xDomains[pxCurrentDomainIndex].uxDomainID ];
+                    pxNewTCB->uxTCBNumber = uxTaskNumber[uxDomainID];
                 #else
                     pxNewTCB->uxTCBNumber = uxTaskNumber;
                 #endif
@@ -2426,14 +2439,18 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
             #endif /* configUSE_TRACE_FACILITY */
             traceTASK_CREATE( pxNewTCB );
 
-            prvAddTaskToReadyList( pxNewTCB );
+            #if ( configENABLE_DOMAINS == 1 )
+                prvAddTaskToReadyListForDomain( pxNewTCB, uxDomainID );
+            #else
+                prvAddTaskToReadyList( pxNewTCB );
+            #endif
 
             portSETUP_TCB( pxNewTCB );
         }
             taskEXIT_CRITICAL();
 
         #if ( configENABLE_DOMAINS == 1 )
-            if( xSchedulerRunning[ xDomains[pxCurrentDomainIndex].uxDomainID ] != pdFALSE )
+            if( xSchedulerRunning[uxDomainID] != pdFALSE )
         #else
             if( xSchedulerRunning != pdFALSE )
         #endif
@@ -2446,6 +2463,15 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
         {
             mtCOVERAGE_TEST_MARKER();
         }
+    }
+
+    static void prvAddNewTaskToReadyList( TCB_t * pxNewTCB )
+    {
+        #if ( configENABLE_DOMAINS == 1 )
+            prvAddNewTaskToReadyListForDomain( pxNewTCB, xDomains[pxCurrentDomainIndex].uxDomainID );
+        #else
+            prvAddNewTaskToReadyListForDomain( pxNewTCB, 0 );
+        #endif
     }
 
 #else /* #if ( configNUMBER_OF_CORES == 1 ) */
