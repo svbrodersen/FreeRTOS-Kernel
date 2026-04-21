@@ -367,6 +367,20 @@
 
 #endif
 
+#if ( configENABLE_DOMAINS == 1 )
+
+#define prvAddTaskToReadyListForDomain( pxTCB, uxDomainID )                          \
+        do {                                                                         \
+            traceMOVED_TASK_TO_READY_STATE(pxTCB);                                   \
+            portRECORD_READY_PRIORITY((pxTCB)->uxPriority, uxTopReadyPriority[uxDomainID]); \
+            listINSERT_END(                                                          \
+                &(pxReadyTasksLists[(pxTCB)->uxPriority][uxDomainID]),               \
+                &((pxTCB)->xStateListItem));                                         \
+            tracePOST_MOVED_TASK_TO_READY_STATE(pxTCB);                              \
+        } while(0)
+
+#endif /* configENABLE_DOMAINS */
+
 /*-----------------------------------------------------------*/
 
 /*
@@ -547,6 +561,10 @@ typedef struct tskTaskControlBlock       /* The old naming convention is used to
 
     #if ( configUSE_POSIX_ERRNO == 1 )
         int iTaskErrno;
+    #endif
+
+    #if ( configENABLE_DOMAINS == 1 )
+        UBaseType_t uxDomainID;
     #endif
 } tskTCB;
 
@@ -2172,6 +2190,11 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
     }
 
     pxNewTCB->uxPriority = uxPriority;
+    #if ( configENABLE_DOMAINS == 1 )
+    {
+        pxNewTCB->uxDomainID = pxCurrentDomain->uxDomainID;
+    }
+    #endif
     #if ( configUSE_MUTEXES == 1 )
     {
         pxNewTCB->uxBasePriority = uxPriority;
@@ -6545,13 +6568,17 @@ BaseType_t xTaskRemoveFromEventList( const List_t * const pxEventList )
     listREMOVE_ITEM( &( pxUnblockedTCB->xEventListItem ) );
 
     #if ( configENABLE_DOMAINS == 1 )
-        if( uxSchedulerSuspended[ pxCurrentDomain->uxDomainID ] == ( UBaseType_t ) 0U )
+        if( uxSchedulerSuspended[ pxUnblockedTCB->uxDomainID ] == ( UBaseType_t ) 0U )
     #else
         if( uxSchedulerSuspended == ( UBaseType_t ) 0U )
     #endif
     {
         listREMOVE_ITEM( &( pxUnblockedTCB->xStateListItem ) );
-        prvAddTaskToReadyList( pxUnblockedTCB );
+        #if ( configENABLE_DOMAINS == 1 )
+            prvAddTaskToReadyListForDomain( pxUnblockedTCB, pxUnblockedTCB->uxDomainID );
+        #else
+            prvAddTaskToReadyList( pxUnblockedTCB );
+        #endif
 
         #if ( configUSE_TICKLESS_IDLE != 0 )
         {
@@ -6572,7 +6599,7 @@ BaseType_t xTaskRemoveFromEventList( const List_t * const pxEventList )
         /* The delayed and ready lists cannot be accessed, so hold this task
          * pending until the scheduler is resumed. */
         #if ( configENABLE_DOMAINS == 1 )
-            listINSERT_END( &( xPendingReadyList[ pxCurrentDomain->uxDomainID ] ), &( pxUnblockedTCB->xEventListItem ) );
+            listINSERT_END( &( xPendingReadyList[ pxUnblockedTCB->uxDomainID ] ), &( pxUnblockedTCB->xEventListItem ) );
         #else
             listINSERT_END( &( xPendingReadyList ), &( pxUnblockedTCB->xEventListItem ) );
         #endif
@@ -6580,7 +6607,7 @@ BaseType_t xTaskRemoveFromEventList( const List_t * const pxEventList )
 
     #if ( configNUMBER_OF_CORES == 1 )
     {
-        if( pxUnblockedTCB->uxPriority > pxCurrentTCB->uxPriority )
+        if( pxUnblockedTCB->uxPriority > pxCurrentTCB->uxPriority && pxUnblockedTCB->uxPriority == pxCurrentDomain->uxDomainID )
         {
             /* Return true if the task removed from the event list has a higher
              * priority than the calling task.  This allows the calling task to know if

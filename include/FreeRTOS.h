@@ -3231,6 +3231,10 @@ typedef struct xSTATIC_TCB
     #if ( configUSE_POSIX_ERRNO == 1 )
         int iDummy22;
     #endif
+
+    #if ( configENABLE_DOMAINS == 1 )
+        UBaseType_t uxDummy23;
+    #endif
 } StaticTask_t;
 
 /*
