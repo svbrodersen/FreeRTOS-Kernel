@@ -613,7 +613,8 @@ PRIVILEGED_DATA static List_t xPendingReadyList[configNUM_TIME_SLICES];         
 
 /* Other file private variables. --------------------------------*/
 PRIVILEGED_DATA static volatile UBaseType_t uxCurrentNumberOfTasks[configNUM_TIME_SLICES] = {0U};
-PRIVILEGED_DATA static volatile TickType_t xTickCount = ( TickType_t ) configINITIAL_TICK_COUNT;
+PRIVILEGED_DATA static volatile TickType_t xEffectiveTick = ( TickType_t ) configINITIAL_TICK_COUNT;
+PRIVILEGED_DATA static volatile TickType_t xTickCount[configNUM_TIME_SLICES] = { ( TickType_t ) configINITIAL_TICK_COUNT };
 PRIVILEGED_DATA static volatile UBaseType_t uxTopReadyPriority[configNUM_TIME_SLICES] = { tskIDLE_PRIORITY };
 PRIVILEGED_DATA static volatile TickType_t xPendedTicks[configNUM_TIME_SLICES] = {( TickType_t ) 0U};
 PRIVILEGED_DATA static volatile BaseType_t xSchedulerRunning[configNUM_TIME_SLICES] = { pdFALSE };
@@ -812,7 +813,11 @@ static BaseType_t prvCreateIdleTasks( void );
  * Utility to ready all the lists used by the scheduler.  This is called
  * automatically upon the creation of the first task.
  */
-static void prvInitialiseTaskLists( void ) PRIVILEGED_FUNCTION;
+#if ( configENABLE_DOMAINS == 1)
+static void prvInitialiseTaskLists( UBaseType_t uxDomain ) PRIVILEGED_FUNCTION;
+#else
+static void prvInitialiseTaskLists( ) PRIVILEGED_FUNCTION;
+#endif
 
 /*
  * The idle task, which as all tasks is implemented as a never ending loop.
@@ -2375,15 +2380,24 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
 
             if( pxCurrentTCB == NULL )
             {
+            #if ( configENABLE_DOMAINS == 1 )
+                if( uxCurrentNumberOfTasks[uxDomainID] == ( UBaseType_t ) 1 )
+                {
+                    /* This is the first task to be created so do the preliminary
+                     * initialisation required.  We will not recover if this call
+                     * fails, but we will report the failure. */
+                    prvInitialiseTaskLists( uxDomainID );
+                }
+                else
+                {
+                    mtCOVERAGE_TEST_MARKER();
+                }
+            #else
                 /* There are no other tasks, or all the other tasks are in
                  * the suspended state - make this the current task. */
                 pxCurrentTCB = pxNewTCB;
 
-            #if ( configENABLE_DOMAINS == 1 )
-                if( uxCurrentNumberOfTasks[uxDomainID] == ( UBaseType_t ) 1 )
-            #else
                 if( uxCurrentNumberOfTasks == ( UBaseType_t ) 1 )
-            #endif
                 {
                     /* This is the first task to be created so do the preliminary
                      * initialisation required.  We will not recover if this call
@@ -2394,6 +2408,7 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
                 {
                     mtCOVERAGE_TEST_MARKER();
                 }
+            #endif
             }
             else
             {
@@ -2786,11 +2801,12 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
         {
             /* Minor optimisation.  The tick count cannot change in this
              * block. */
-            const TickType_t xConstTickCount = xTickCount;
 
             #if ( configENABLE_DOMAINS == 1 )
+                const TickType_t xConstTickCount = xTickCount[xDomains[pxCurrentDomainIndex].uxDomainID];
                 configASSERT( uxSchedulerSuspended[ xDomains[pxCurrentDomainIndex].uxDomainID ] == 1U );
             #else
+                const TickType_t xConstTickCount = xTickCount;
                 configASSERT( uxSchedulerSuspended == 1U );
             #endif
 
@@ -4429,15 +4445,16 @@ void vTaskStartScheduler( void )
             {
                 xNextTaskUnblockTime[ uxDomain ] = portMAX_DELAY;
                 xSchedulerRunning[ uxDomain ] = pdTRUE;
+                xTickCount[ uxDomain ] = configINITIAL_TICK_COUNT;
             }
         }
         #else
         {
             xNextTaskUnblockTime = portMAX_DELAY;
             xSchedulerRunning = pdTRUE;
+            xTickCount = ( TickType_t ) configINITIAL_TICK_COUNT;
         }
         #endif
-        xTickCount = ( TickType_t ) configINITIAL_TICK_COUNT;
 
         /* If configGENERATE_RUN_TIME_STATS is defined then the following
          * macro must be defined to configure the timer/counter used to generate
@@ -4446,6 +4463,18 @@ void vTaskStartScheduler( void )
          * have portCONFIGURE_TIMER_FOR_RUN_TIME_STATS() defined in your
          * FreeRTOSConfig.h file. */
         portCONFIGURE_TIMER_FOR_RUN_TIME_STATS();
+
+        #if ( configENABLE_DOMAINS == 1 )
+        UBaseType_t uxCurrentDomainID = xDomains[pxCurrentDomainIndex].uxDomainID;
+        if( uxTopReadyPriority[ uxCurrentDomainID ] == ( UBaseType_t ) 0U )
+        {
+            pxCurrentTCB = xIdleTaskHandles[ 0 ];
+        }
+        else
+        {
+            taskSELECT_HIGHEST_PRIORITY_TASK();
+        }
+        #endif
 
         traceTASK_SWITCHED_IN();
 
@@ -5036,7 +5065,11 @@ TickType_t xTaskGetTickCount( void )
     /* Critical section required if running on a 16 bit processor. */
     portTICK_TYPE_ENTER_CRITICAL();
     {
+    #if ( configENABLE_DOMAINS == 1 )
+        xTicks = xTickCount[xDomains[pxCurrentDomainIndex].uxDomainID];
+    #else
         xTicks = xTickCount;
+    #endif
     }
     portTICK_TYPE_EXIT_CRITICAL();
 
@@ -5044,6 +5077,24 @@ TickType_t xTaskGetTickCount( void )
 
     return xTicks;
 }
+
+#if ( configENABLE_DOMAINS == 1 )
+
+TickType_t xTaskGetDomainTick( void )
+{
+    TickType_t xTicks;
+
+    /* Critical section required if running on a 16 bit processor. */
+    portTICK_TYPE_ENTER_CRITICAL();
+    {
+        xTicks = xDomainTick;
+    }
+    portTICK_TYPE_EXIT_CRITICAL();
+
+    return xTicks;
+}
+
+#endif
 /*-----------------------------------------------------------*/
 
 TickType_t xTaskGetTickCountFromISR( void )
@@ -5071,7 +5122,11 @@ TickType_t xTaskGetTickCountFromISR( void )
 
     uxSavedInterruptStatus = portTICK_TYPE_SET_INTERRUPT_MASK_FROM_ISR();
     {
+    #if ( configENABLE_DOMAINS == 1 )
+        xReturn = xTickCount[xDomains[pxCurrentDomainIndex].uxDomainID];
+    #else
         xReturn = xTickCount;
+    #endif
     }
     portTICK_TYPE_CLEAR_INTERRUPT_MASK_FROM_ISR( uxSavedInterruptStatus );
 
@@ -5480,7 +5535,12 @@ char * pcTaskGetName( TaskHandle_t xTaskToQuery )
         /* Correct the tick count value after a period during which the tick
          * was suppressed.  Note this does *not* call the tick hook function for
          * each stepped tick. */
-        xUpdatedTickCount = xTickCount + xTicksToJump;
+
+        #if ( configENABLE_DOMAINS == 1 )
+            xUpdatedTickCount = xTickCount[xDomains[pxCurrentDomainIndex].uxDomainID] + xTicksToJump;
+        #else
+            xUpdatedTickCount = xTickCount + xTicksToJump;
+        #endif
         configASSERT( xUpdatedTickCount <= xNextTaskUnblockTime );
 
         if( xUpdatedTickCount == xNextTaskUnblockTime )
@@ -5504,7 +5564,11 @@ char * pcTaskGetName( TaskHandle_t xTaskToQuery )
             mtCOVERAGE_TEST_MARKER();
         }
 
-        xTickCount += xTicksToJump;
+        #if ( configENABLE_DOMAINS == 1 )
+            xTickCount[xDomains[pxCurrentDomainIndex].uxDomainID] = xTicksToJump;
+        #else
+            xTickCount = xTicksToJump;
+        #endif
 
         traceINCREASE_TICK_COUNT( xTicksToJump );
         traceRETURN_vTaskStepTick();
@@ -5656,12 +5720,52 @@ BaseType_t xTaskCatchUpTicks( TickType_t xTicksToCatchUp )
         TickType_t xItemValue;
         BaseType_t xSwitchRequired = pdFALSE;
 
+        /* Update xConstTickCount */
+        const TickType_t xConstTickCount = xEffectiveTick + ( TickType_t ) 1;
+
+        /* Increment the effective tick. This is different than xTickCount,
+         * which does not increment if the scheduler is in a critical section.
+         * The Domain scheduler does not care about critical section */
+        xEffectiveTick  = xConstTickCount;
+
+        /* Update the Domain tick in regards to the effective tick */
+        xDomainTick = (xEffectiveTick / configNUM_TICKS_PER_SLICE) % configNUM_TIME_SLICES;
+
+        /* Time slot expired or wraparound */
+        if( xDomainTick >= pxCurrentDomainIndex + xDomains[pxCurrentDomainIndex].uxLength
+            || xDomainTick < pxCurrentDomainIndex )
+        {
+            /* Save current task to logical domain info */
+            xDomainInfo[xDomains[pxCurrentDomainIndex].uxDomainID].pxPreviousTCB = pxCurrentTCB;
+
+            xSwitchRequired = pdTRUE;
+
+            /* Flush on domain switch */
+            temporal_fence_t();
+
+            /* Contiguous partition: next block starts exactly here */
+            pxCurrentDomainIndex += xDomains[pxCurrentDomainIndex].uxLength;
+            if( pxCurrentDomainIndex >= configNUM_TIME_SLICES )
+            {
+                pxCurrentDomainIndex = 0;
+            }
+
+            /* Restore previous task from logical domain info */
+            TCB_t * previous_tcb = xDomainInfo[xDomains[pxCurrentDomainIndex].uxDomainID].pxPreviousTCB;
+            /* First time, use idle task */
+            if (previous_tcb == NULL) {
+                pxCurrentTCB = xIdleTaskHandles[ 0 ];
+            } else {
+                pxCurrentTCB = previous_tcb;
+            }
+        }
+
         traceENTER_xTaskIncrementTick();
 
         /* Called by the portable layer each time a tick interrupt occurs.
          * Increments the tick then checks to see if the new tick value will cause any
          * tasks to be unblocked. */
-        traceTASK_INCREMENT_TICK( xTickCount );
+        traceTASK_INCREMENT_TICK( xTickCount[xDomains[pxCurrentDomainIndex].uxDomainID] );
 
         /* Tick increment should occur on every kernel timer event. Core 0 has the
          * responsibility to increment the tick, or increment the pended ticks if the
@@ -5669,13 +5773,11 @@ BaseType_t xTaskCatchUpTicks( TickType_t xTicksToCatchUp )
          * calls xTaskResumeAll has the responsibility to increment the tick. */
         if( uxSchedulerSuspended[ xDomains[pxCurrentDomainIndex].uxDomainID ] == ( UBaseType_t ) 0U )
         {
-            /* Minor optimisation.  The tick count cannot change in this
-             * block. */
-            const TickType_t xConstTickCount = xTickCount + ( TickType_t ) 1;
 
+            const TickType_t xConstTickCount = xTickCount[xDomains[pxCurrentDomainIndex].uxDomainID] + ( TickType_t ) 1;
             /* Increment the RTOS tick, switching the delayed and overflowed
              * delayed lists if it wraps to 0. */
-            xTickCount = xConstTickCount;
+            xTickCount[xDomains[pxCurrentDomainIndex].uxDomainID] = xConstTickCount;
 
             if( xConstTickCount == ( TickType_t ) 0U )
             {
@@ -5894,38 +5996,6 @@ BaseType_t xTaskCatchUpTicks( TickType_t xTicksToCatchUp )
             #endif
         }
 
-        #if ( configENABLE_DOMAINS == 1 )
-            /* Minor optimisation.  The tick count cannot change in this
-             * block. */
-            const TickType_t xConstTickCount = xTickCount % configNUM_TIME_SLICES;
-
-            /* Update the domain tick */
-            xDomainTick = xConstTickCount;
-
-            /* Time slot expired or wraparound */
-            if( xDomainTick >= pxCurrentDomainIndex + xDomains[pxCurrentDomainIndex].uxLength
-                || xDomainTick < pxCurrentDomainIndex )
-            {
-                /* Save current task to logical domain info */
-                xDomainInfo[xDomains[pxCurrentDomainIndex].uxDomainID].pxPreviousTCB = pxCurrentTCB;
-
-                xSwitchRequired = pdTRUE;
-
-                /* Flush on domain switch */
-                temporal_fence_t();
-
-                /* Contiguous partition: next block starts exactly here */
-                pxCurrentDomainIndex += xDomains[pxCurrentDomainIndex].uxLength;
-                if( pxCurrentDomainIndex >= configNUM_TIME_SLICES )
-                {
-                    pxCurrentDomainIndex = 0;
-                }
-
-                /* Restore previous task from logical domain info */
-                pxCurrentTCB = xDomainInfo[xDomains[pxCurrentDomainIndex].uxDomainID].pxPreviousTCB;
-
-            }
-        #endif
 
         traceRETURN_xTaskIncrementTick( xSwitchRequired );
 
@@ -6664,7 +6734,7 @@ void vTaskPlaceOnUnorderedEventList( List_t * pxEventList,
             xTicksToWait = portMAX_DELAY;
         }
 
-        traceTASK_DELAY_UNTIL( ( xTickCount + xTicksToWait ) );
+        traceTASK_DELAY_UNTIL( ( xTickCount[xDomains[pxCurrentDomainIndex].uxDomainID] + xTicksToWait ) );
         prvAddCurrentTaskToDelayedList( xTicksToWait, xWaitIndefinitely );
 
         traceRETURN_vTaskPlaceOnEventListRestricted();
@@ -6867,10 +6937,11 @@ void vTaskSetTimeOutState( TimeOut_t * const pxTimeOut )
     {
         #if ( configENABLE_DOMAINS == 1 )
             pxTimeOut->xOverflowCount = xNumOfOverflows[ xDomains[pxCurrentDomainIndex].uxDomainID ];
+            pxTimeOut->xTimeOnEntering = xTickCount[ xDomains[pxCurrentDomainIndex].uxDomainID ];
         #else
             pxTimeOut->xOverflowCount = xNumOfOverflows;
+            pxTimeOut->xTimeOnEntering = xTickCount;
         #endif
-        pxTimeOut->xTimeOnEntering = xTickCount;
     }
     taskEXIT_CRITICAL();
 
@@ -6885,10 +6956,11 @@ void vTaskInternalSetTimeOutState( TimeOut_t * const pxTimeOut )
     /* For internal use only as it does not use a critical section. */
     #if ( configENABLE_DOMAINS == 1 )
         pxTimeOut->xOverflowCount = xNumOfOverflows[ xDomains[pxCurrentDomainIndex].uxDomainID ];
+        pxTimeOut->xTimeOnEntering = xTickCount[ xDomains[pxCurrentDomainIndex].uxDomainID ];
     #else
         pxTimeOut->xOverflowCount = xNumOfOverflows;
+        pxTimeOut->xTimeOnEntering = xTickCount;
     #endif
-    pxTimeOut->xTimeOnEntering = xTickCount;
 
     traceRETURN_vTaskInternalSetTimeOutState();
 }
@@ -6907,7 +6979,11 @@ BaseType_t xTaskCheckForTimeOut( TimeOut_t * const pxTimeOut,
     taskENTER_CRITICAL();
     {
         /* Minor optimisation.  The tick count cannot change in this block. */
-        const TickType_t xConstTickCount = xTickCount;
+        #if (configENABLE_DOMAINS == 1)
+            const TickType_t xConstTickCount = xTickCount[xDomains[pxCurrentDomainIndex].uxDomainID];
+        #else
+            const TickType_t xConstTickCount = xTickCount;
+        #endif
         const TickType_t xElapsedTime = xConstTickCount - pxTimeOut->xTimeOnEntering;
 
         #if ( INCLUDE_xTaskAbortDelay == 1 )
@@ -7384,58 +7460,55 @@ static portTASK_FUNCTION( prvIdleTask, pvParameters )
 
 #if ( configENABLE_DOMAINS == 1)
 
-static void prvInitialiseTaskLists( void )
+static void prvInitialiseTaskLists( UBaseType_t uxDomain )
 {
     UBaseType_t uxPriority;
 
     /* Initialize all domains at startup, not just the current domain.
      * This ensures that when new domains are created via prvCreateDomain(),
      * all lists and variables are already properly initialized. */
-    for( UBaseType_t uxDomain = 0; uxDomain < configNUM_TIME_SLICES; uxDomain++ )
+    /* Initialize ready lists for all priorities in this domain. */
+    for( uxPriority = ( UBaseType_t ) 0U; uxPriority < ( UBaseType_t ) configMAX_PRIORITIES; uxPriority++ )
     {
-        /* Initialize ready lists for all priorities in this domain. */
-        for( uxPriority = ( UBaseType_t ) 0U; uxPriority < ( UBaseType_t ) configMAX_PRIORITIES; uxPriority++ )
-        {
-            vListInitialise( &( pxReadyTasksLists[ uxPriority ][ uxDomain ] ) );
-        }
+        vListInitialise( &( pxReadyTasksLists[ uxPriority ][ uxDomain ] ) );
+    }
 
-        /* Initialize delayed and pending ready lists for this domain. */
-        vListInitialise( &( xDelayedTaskList1[ uxDomain ] ) );
-        vListInitialise( &( xDelayedTaskList2[ uxDomain ] ) );
-        vListInitialise( &( xPendingReadyList[ uxDomain ] ) );
+    /* Initialize delayed and pending ready lists for this domain. */
+    vListInitialise( &( xDelayedTaskList1[ uxDomain ] ) );
+    vListInitialise( &( xDelayedTaskList2[ uxDomain ] ) );
+    vListInitialise( &( xPendingReadyList[ uxDomain ] ) );
 
-        #if ( INCLUDE_vTaskDelete == 1 )
-        {
-            vListInitialise( &( xTasksWaitingTermination[ uxDomain ] ) );
-            uxDeletedTasksWaitingCleanUp[ uxDomain ] = ( UBaseType_t ) 0U;
-        }
-        #endif /* INCLUDE_vTaskDelete */
+    #if ( INCLUDE_vTaskDelete == 1 )
+    {
+        vListInitialise( &( xTasksWaitingTermination[ uxDomain ] ) );
+        uxDeletedTasksWaitingCleanUp[ uxDomain ] = ( UBaseType_t ) 0U;
+    }
+    #endif /* INCLUDE_vTaskDelete */
 
-        #if ( INCLUDE_vTaskSuspend == 1 )
-        {
-            vListInitialise( &( xSuspendedTaskList[ uxDomain ] ) );
-        }
-        #endif /* INCLUDE_vTaskSuspend */
+    #if ( INCLUDE_vTaskSuspend == 1 )
+    {
+        vListInitialise( &( xSuspendedTaskList[ uxDomain ] ) );
+    }
+    #endif /* INCLUDE_vTaskSuspend */
 
-        /* Initialize pointer arrays for delayed task lists. */
-        pxDelayedTaskList[ uxDomain ] = &xDelayedTaskList1[ uxDomain ];
-        pxOverflowDelayedTaskList[ uxDomain ] = &xDelayedTaskList2[ uxDomain ];
+    /* Initialize pointer arrays for delayed task lists. */
+    pxDelayedTaskList[ uxDomain ] = &xDelayedTaskList1[ uxDomain ];
+    pxOverflowDelayedTaskList[ uxDomain ] = &xDelayedTaskList2[ uxDomain ];
 
-        /* Initialize scalar variables for this domain. */
-        uxTopReadyPriority[ uxDomain ] = tskIDLE_PRIORITY;
-        uxCurrentNumberOfTasks[ uxDomain ] = ( UBaseType_t ) 0U;
-        xPendedTicks[ uxDomain ] = ( TickType_t ) 0U;
-        xSchedulerRunning[ uxDomain ] = pdFALSE;
-        uxSchedulerSuspended[ uxDomain ] = ( UBaseType_t ) 0U;
-        xNumOfOverflows[ uxDomain ] = ( BaseType_t ) 0;
-        uxTaskNumber[ uxDomain ] = ( UBaseType_t ) 0U;
-        xNextTaskUnblockTime[ uxDomain ] = portMAX_DELAY;
+    /* Initialize scalar variables for this domain. */
+    uxTopReadyPriority[ uxDomain ] = tskIDLE_PRIORITY;
+    uxCurrentNumberOfTasks[ uxDomain ] = ( UBaseType_t ) 0U;
+    xPendedTicks[ uxDomain ] = ( TickType_t ) 0U;
+    xSchedulerRunning[ uxDomain ] = pdFALSE;
+    uxSchedulerSuspended[ uxDomain ] = ( UBaseType_t ) 0U;
+    xNumOfOverflows[ uxDomain ] = ( BaseType_t ) 0;
+    uxTaskNumber[ uxDomain ] = ( UBaseType_t ) 0U;
+    xNextTaskUnblockTime[ uxDomain ] = portMAX_DELAY;
 
-        /* Initialize yield pending flags for all cores in this domain. */
-        for( BaseType_t xCore = 0; xCore < configNUMBER_OF_CORES; xCore++ )
-        {
-            xYieldPendings[ xCore ][ uxDomain ] = pdFALSE;
-        }
+    /* Initialize yield pending flags for all cores in this domain. */
+    for( BaseType_t xCore = 0; xCore < configNUMBER_OF_CORES; xCore++ )
+    {
+        xYieldPendings[ xCore ][ uxDomain ] = pdFALSE;
     }
 }
 
@@ -9428,7 +9501,11 @@ TickType_t uxTaskResetEventItemValue( void )
                     /* Should not get here if all enums are handled.
                      * Artificially force an assert by testing a value the
                      * compiler can't assume is const. */
-                    configASSERT( xTickCount == ( TickType_t ) 0 );
+                    #if (configENABLE_DOMAINS == 1)
+                        configASSERT( xTickCount[xDomains[pxCurrentDomainIndex].uxDomainID] == ( TickType_t ) 0 );
+                    #else
+                        configASSERT( xTickCount == ( TickType_t ) 0 );
+                    #endif
 
                     break;
             }
@@ -9571,7 +9648,11 @@ TickType_t uxTaskResetEventItemValue( void )
                     /* Should not get here if all enums are handled.
                      * Artificially force an assert by testing a value the
                      * compiler can't assume is const. */
-                    configASSERT( xTickCount == ( TickType_t ) 0 );
+                    #if (configENABLE_DOMAINS == 1)
+                        configASSERT( xTickCount[xDomains[pxCurrentDomainIndex].uxDomainID] == ( TickType_t ) 0 );
+                    #else
+                        configASSERT( xTickCount == ( TickType_t ) 0 );
+                    #endif
                     break;
             }
 
@@ -10062,13 +10143,14 @@ static void prvAddCurrentTaskToDelayedList( TickType_t xTicksToWait,
                                             const BaseType_t xCanBlockIndefinitely )
 {
     TickType_t xTimeToWake;
-    const TickType_t xConstTickCount = xTickCount;
     #if ( configENABLE_DOMAINS == 1 )
+        const TickType_t xConstTickCount = xTickCount[xDomains[pxCurrentDomainIndex].uxDomainID];
         List_t * const pxDelayedList = pxDelayedTaskList[xDomains[pxCurrentDomainIndex].uxDomainID];
         List_t * const pxOverflowDelayedList = pxOverflowDelayedTaskList[xDomains[pxCurrentDomainIndex].uxDomainID];
         List_t * const pxLocalSuspendedTaskList = &xSuspendedTaskList[xDomains[pxCurrentDomainIndex].uxDomainID];
         UBaseType_t uxLocalTopReadyPriority = uxTopReadyPriority[xDomains[pxCurrentDomainIndex].uxDomainID];
     #else
+        const TickType_t xConstTickCount = xTickCount;
         List_t * const pxDelayedList = pxDelayedTaskList;
         List_t * const pxOverflowDelayedList = pxOverflowDelayedTaskList;
         List_t * const pxLocalSuspendedTaskList = &xSuspendedTaskList;
@@ -10340,7 +10422,7 @@ void vTaskResetState( void )
 
     /* Other file private variables. */
     uxCurrentNumberOfTasks[xDomains[pxCurrentDomainIndex].uxDomainID] = ( UBaseType_t ) 0U;
-    xTickCount = ( TickType_t ) configINITIAL_TICK_COUNT;
+    xTickCount[xDomains[pxCurrentDomainIndex].uxDomainID] = ( TickType_t ) configINITIAL_TICK_COUNT;
     uxTopReadyPriority[xDomains[pxCurrentDomainIndex].uxDomainID] = tskIDLE_PRIORITY;
     xSchedulerRunning[xDomains[pxCurrentDomainIndex].uxDomainID] = pdFALSE;
     xPendedTicks[xDomains[pxCurrentDomainIndex].uxDomainID] = ( TickType_t ) 0U;

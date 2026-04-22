@@ -1719,6 +1719,23 @@ BaseType_t xTaskResumeAll( void ) PRIVILEGED_FUNCTION;
  */
 TickType_t xTaskGetTickCount( void ) PRIVILEGED_FUNCTION;
 
+
+#if ( configENABLE_DOMAINS == 1 )
+/**
+ * task. h
+ * @code{c}
+ * TickType_t xTaskGetDomainTick( void );
+ * @endcode
+ *
+ * @return The current domain tick.
+ *
+ * \defgroup xTaskGetTickCount xTaskGetTickCount
+ * \ingroup TaskUtils
+ */
+TickType_t xTaskGetDomainTick( void ) PRIVILEGED_FUNCTION;
+#endif
+
+
 /**
  * task. h
  * @code{c}
