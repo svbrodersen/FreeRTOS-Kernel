@@ -140,7 +140,7 @@ typedef struct xTIME_OUT
  * Defines Parameters used for creating a new domain
  */
 typedef struct xDOMAIN_PARAMETERS {
-    uint32_t ulSliceOffset;   /* Offset into parent domain's time slice */
+    uint32_t ulSliceIndex;   /* Offset into parent domain's time slice */
     uint32_t ulSliceLength;   /* Number of time slices for new domain */
 } DomainParameters_t;
 
