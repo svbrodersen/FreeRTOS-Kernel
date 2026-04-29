@@ -590,7 +590,7 @@ typedef tskTCB TCB_t;
  * the static qualifier. */
 #if ( configENABLE_DOMAINS == 1 )
 
-PRIVILEGED_DATA static List_t pxReadyTasksLists[ configMAX_PRIORITIES ][configNUM_TIME_SLICES]; /**< Prioritised ready tasks. */
+PRIVILEGED_DATA static List_t pxReadyTasksLists[ configMAX_PRIORITIES ][ configNUM_TIME_SLICES ]; /**< Prioritised ready tasks. */
 PRIVILEGED_DATA static List_t xDelayedTaskList1[configNUM_TIME_SLICES];                         /**< Delayed tasks. */
 PRIVILEGED_DATA static List_t xDelayedTaskList2[configNUM_TIME_SLICES];                         /**< Delayed tasks (two lists are used - one for delays that have overflowed the current tick count. */
 PRIVILEGED_DATA static List_t * volatile pxDelayedTaskList[configNUM_TIME_SLICES];              /**< Points to the delayed task list currently being used. */
@@ -5768,7 +5768,6 @@ BaseType_t xTaskCatchUpTicks( TickType_t xTicksToCatchUp )
         if( xDomainTick >= pxCurrentDomainIndex + xDomains[pxCurrentDomainIndex].uxLength
             || xDomainTick < pxCurrentDomainIndex )
         {
-            domain_round_trip_marker();
             /* Save current task to logical domain info */
             xDomainInfo[xDomains[pxCurrentDomainIndex].uxDomainID].pxPreviousTCB = pxCurrentTCB;
 
@@ -5776,6 +5775,7 @@ BaseType_t xTaskCatchUpTicks( TickType_t xTicksToCatchUp )
 
             /* Flush on domain switch */
             temporal_fence_t();
+            domain_round_trip_marker();
 
             /* Contiguous partition: next block starts exactly here */
             pxCurrentDomainIndex += xDomains[pxCurrentDomainIndex].uxLength;
@@ -6469,31 +6469,29 @@ BaseType_t xTaskCatchUpTicks( TickType_t xTicksToCatchUp )
     static void domain_round_trip_marker(void) {
         __asm__ __volatile__("addi x0, x0, 14");
 
-        #if ( configENABLE_DOMAIN_TIMING == 1 )
+#if ( configENABLE_DOMAIN_TIMING == 1 )
+        static uint64_t ullPrevMtime = 0;
+
+        uint64_t ullMtime;
+        uint64_t ullMtimeHigh;
+
+        asm volatile ("rdtime %0" : "=r"(ullMtime));
+        asm volatile ("rdtimeh %0" : "=r"(ullMtimeHigh));
+        ullMtime = ((ullMtimeHigh<< 32) | ullMtime);
+
+        UBaseType_t uxDomain = xDomains[pxCurrentDomainIndex].uxDomainID;
+
+        if (ullPrevMtime != 0)
         {
-            static uint64_t ullPrevMtime = 0;
-            uint32_t ulHigh, ulLow;
-            volatile uint32_t * pulHigh = ( volatile uint32_t * const ) ( configMTIME_BASE_ADDRESS + 4UL );
-            volatile uint32_t * pulLow  = ( volatile uint32_t * const ) ( configMTIME_BASE_ADDRESS );
+            uint64_t ullDelta = ullMtime - ullPrevMtime;
 
-            do {
-                ulHigh = *pulHigh;
-                ulLow  = *pulLow;
-            } while( ulHigh != *pulHigh );
-
-            uint64_t ullMtime = ( ( uint64_t ) ulHigh << 32ULL ) | ( uint64_t ) ulLow;
-            UBaseType_t uxDomain = xDomains[pxCurrentDomainIndex].uxDomainID;
-
-            if( ullPrevMtime != 0 )
-            {
-                uint64_t ullDelta = ullMtime - ullPrevMtime;
-                printf( "Round Trip: domain=%d delta=%d\n",
-                        ( unsigned long ) uxDomain,
-                        ( unsigned long long ) ullDelta );
-            Round Trip
-            ullPrevMtime = ullMtime;
+            printf("Round Trip: domain=%d delta=%d\n",
+                   (unsigned long)uxDomain,
+                   (unsigned long long)ullDelta);
         }
-        #endif
+
+        ullPrevMtime = ullMtime;
+#endif
     }
 
     void vTaskSwitchContext( void )
