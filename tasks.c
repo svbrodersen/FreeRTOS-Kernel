@@ -644,38 +644,28 @@ PRIVILEGED_DATA static volatile UBaseType_t uxSchedulerSuspended[configNUM_TIME_
 typedef struct DomainBlock {
   UBaseType_t uxDomainID; /* This time slices domain ID */
   size_t uxLength; /* Length of this domain */
+  size_t uxNext;
 } DomainBlock_t;
 
 /* Timeline over configNUM_TIME_SLICES, indexed by the start of a block */
 PRIVILEGED_DATA static DomainBlock_t xDomains[configNUM_TIME_SLICES] = {
-    [0] = {.uxDomainID = 0, .uxLength = configNUM_TIME_SLICES}
-};
-
-typedef struct DomainListItem {
-    size_t uxBlockStart;
-    struct DomainListItem* next;
-} DomainListItem_t;
-
-PRIVILEGED_DATA static DomainListItem_t xDomainItemPool[configNUM_TIME_SLICES] = {
-    [0] = {.uxBlockStart = 0, .next = NULL}
+    [0] = {.uxDomainID = 0, .uxLength = configNUM_TIME_SLICES, .uxNext = SIZE_MAX}
 };
 
 typedef struct DomainInfo {
     TCB_t * volatile pxPreviousTCB;
-    DomainListItem_t * pxFirstBlock;  /* Singly-linked list of this domain's owned blocks */
+    size_t           uxFirstBlock;  /* start index of first block, or SIZE_MAX */
 } DomainInfo_t;
 
-/* Timeline over Domain information indexed by the Domain ID */
+/* Domain information indexed by domain id */
 PRIVILEGED_DATA static DomainInfo_t xDomainInfo[configNUM_TIME_SLICES] = {
-    [0] = {.pxPreviousTCB = NULL, .pxFirstBlock = &xDomainItemPool[0]}
+    [0] = {.pxPreviousTCB = NULL, .uxFirstBlock = 0}
 };
 
 PRIVILEGED_DATA static size_t pxCurrentDomainIndex = 0;
 
 PRIVILEGED_DATA static volatile TickType_t xEffectiveTick = ( TickType_t ) configINITIAL_TICK_COUNT;
 PRIVILEGED_DATA static volatile TickType_t xDomainTick = ( TickType_t ) 0;
-
-PRIVILEGED_DATA static UBaseType_t uxNextFreeDomainItem = 1;
 
 PRIVILEGED_DATA static volatile UBaseType_t uxNextDomainID = 1;
 
@@ -798,6 +788,8 @@ static BaseType_t prvCreateIdleTasks( void );
 #if ( configENABLE_DOMAINS == 1 )
     static BaseType_t prvCreateDomain(DomainParameters_t* pxParams, UBaseType_t * puxNewDomainSlot);
     static void domain_round_trip_marker(void);
+    static void start_timing(void);
+    static void end_timing(void);
 #endif
 
 /*
@@ -4258,91 +4250,30 @@ static BaseType_t prvCreateIdleTasks( void )
 #if ( configENABLE_DOMAINS == 1 )
     static void temporal_fence_t(void);
 
-    static DomainListItem_t * pxAllocateBlockItem(void)
-    {
-        if (uxNextFreeDomainItem >= configNUM_TIME_SLICES)
-        {
-            return NULL;
-        }
-
-        return &xDomainItemPool[uxNextFreeDomainItem++];
-    }
-
-    static DomainListItem_t * prvFindContainingBlock(
-        DomainInfo_t * pxInfo,
+    static BaseType_t prvFindContainingBlock(
+        size_t uxFirstBlock,
         size_t start,
-        size_t length)
+        size_t length,
+        size_t * puxPrevBlock,
+        size_t * puxBlock)
     {
-        DomainListItem_t * pxBlock = pxInfo->pxFirstBlock;
+        size_t prev = SIZE_MAX;
 
-        while (pxBlock != NULL)
+        for (size_t current = uxFirstBlock; current != SIZE_MAX; current = xDomains[current].uxNext)
         {
-            size_t blockStart = pxBlock->uxBlockStart;
-            size_t blockEnd = blockStart + xDomains[blockStart].uxLength;
+            size_t blockEnd = current + xDomains[current].uxLength;
 
-            if (start >= blockStart && (start + length) <= blockEnd)
+            if (start >= current && (start + length) <= blockEnd)
             {
-                return pxBlock;
+                *puxPrevBlock = prev;
+                *puxBlock = current;
+                return pdTRUE;
             }
 
-            pxBlock = pxBlock->next;
+            prev = current;
         }
 
-        return NULL;
-    }
-
-    static BaseType_t prvSplitBlock(
-        DomainListItem_t * pxBlock,
-        size_t blockStart,
-        size_t blockEnd,
-        size_t sliceStart,
-        size_t sliceLength,
-        UBaseType_t uxCurrentDomainID,
-        DomainListItem_t ** ppxChildOut)
-    {
-        DomainListItem_t * pxRight = NULL;
-        DomainListItem_t * pxChild = NULL;
-
-        /* Left fragment */
-        if (sliceStart > blockStart)
-        {
-            xDomains[blockStart].uxLength =
-                sliceStart - blockStart;
-        }
-
-        /* Right fragment */
-        if (sliceStart + sliceLength < blockEnd)
-        {
-            pxRight = pxAllocateBlockItem();
-            if (pxRight == NULL)
-            {
-                return pdFAIL;
-            }
-
-            pxRight->uxBlockStart = sliceStart + sliceLength;
-            pxRight->next = pxBlock->next;
-            pxBlock->next = pxRight;
-
-            xDomains[pxRight->uxBlockStart].uxDomainID =
-                uxCurrentDomainID;
-
-            xDomains[pxRight->uxBlockStart].uxLength =
-                blockEnd - pxRight->uxBlockStart;
-        }
-
-        /* Child block */
-        pxChild = pxAllocateBlockItem();
-        if (pxChild == NULL)
-        {
-            return pdFAIL;
-        }
-
-        pxChild->uxBlockStart = sliceStart;
-        pxChild->next = NULL;
-
-        *ppxChildOut = pxChild;
-
-        return pdTRUE;
+        return pdFAIL;
     }
 
     static BaseType_t prvCreateDomain(
@@ -4362,21 +4293,17 @@ static BaseType_t prvCreateIdleTasks( void )
         UBaseType_t uxCurrentDomainID =
             xDomains[pxCurrentDomainIndex].uxDomainID;
 
-        DomainInfo_t * pxInfo =
-            &xDomainInfo[uxCurrentDomainID];
+        size_t uxFirstBlock = xDomainInfo[uxCurrentDomainID].uxFirstBlock;
+        size_t prev = SIZE_MAX;
+        size_t blockStart = SIZE_MAX;
 
-        DomainListItem_t * pxBlock =
-            prvFindContainingBlock(pxInfo, start, length);
-
-        if (pxBlock == NULL)
+        if (prvFindContainingBlock(uxFirstBlock, start, length, &prev, &blockStart) != pdTRUE)
         {
             taskEXIT_CRITICAL();
             return pdFAIL;
         }
 
-        size_t blockStart = pxBlock->uxBlockStart;
-        size_t blockEnd =
-            blockStart + xDomains[blockStart].uxLength;
+        size_t blockEnd = blockStart + xDomains[blockStart].uxLength;
 
         /* reject overlap with current tick */
         if (start <= xDomainTick &&
@@ -4386,27 +4313,46 @@ static BaseType_t prvCreateIdleTasks( void )
             return pdFAIL;
         }
 
-        DomainListItem_t * pxChild = NULL;
-
-        if (prvSplitBlock( pxBlock,
-                blockStart,
-                blockEnd,
-                start,
-                length,
-                uxCurrentDomainID,
-                &pxChild) != pdTRUE)
+        /* Right fragment */
+        size_t rightStart = SIZE_MAX;
+        if (start + length < blockEnd)
         {
-            taskEXIT_CRITICAL();
-            return pdFAIL;
+            rightStart = start + length;
+            xDomains[rightStart].uxDomainID = uxCurrentDomainID;
+            xDomains[rightStart].uxLength = blockEnd - rightStart;
+            xDomains[rightStart].uxNext = xDomains[blockStart].uxNext;
         }
 
-        UBaseType_t uxChildDomainID = uxNextDomainID++;
+        /* Left fragment: shrink existing block */
+        if (start > blockStart)
+        {
+            xDomains[blockStart].uxLength = start - blockStart;
+            if (rightStart != SIZE_MAX)
+            {
+                xDomains[blockStart].uxNext = rightStart;
+            }
+        }
+        else /* No left fragment: remove blockStart from parent's list */
+        {
+            size_t spliceNext = (rightStart != SIZE_MAX) ? rightStart : xDomains[blockStart].uxNext;
+            if (prev == SIZE_MAX)
+            {
+                xDomainInfo[uxCurrentDomainID].uxFirstBlock = spliceNext;
+            }
+            else
+            {
+                xDomains[prev].uxNext = spliceNext;
+            }
+        }
 
+        /* Set up child block */
+        UBaseType_t uxChildDomainID = uxNextDomainID++;
         xDomains[start].uxDomainID = uxChildDomainID;
         xDomains[start].uxLength = length;
+        xDomains[start].uxNext = SIZE_MAX;
 
         xDomainInfo[uxChildDomainID].pxPreviousTCB = NULL;
-        xDomainInfo[uxChildDomainID].pxFirstBlock = pxChild;
+        xDomainInfo[uxChildDomainID].uxFirstBlock = start;
 
         *puxNewDomainSlot = start;
 
@@ -5776,6 +5722,7 @@ BaseType_t xTaskCatchUpTicks( TickType_t xTicksToCatchUp )
             /* Flush on domain switch */
             temporal_fence_t();
             domain_round_trip_marker();
+            start_timing();
 
             /* Contiguous partition: next block starts exactly here */
             pxCurrentDomainIndex += xDomains[pxCurrentDomainIndex].uxLength;
@@ -5792,7 +5739,7 @@ BaseType_t xTaskCatchUpTicks( TickType_t xTicksToCatchUp )
             } else {
                 pxCurrentTCB = previous_tcb;
             }
-
+            end_timing();
         }
 
         traceENTER_xTaskIncrementTick();
