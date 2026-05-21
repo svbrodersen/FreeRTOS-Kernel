@@ -4273,7 +4273,7 @@ static BaseType_t prvCreateIdleTasks( void )
             prev = current;
         }
 
-        return pdFAIL;
+        return pdFALSE;
     }
 
     static BaseType_t prvCreateDomain(
@@ -4357,7 +4357,7 @@ static BaseType_t prvCreateIdleTasks( void )
         *puxNewDomainSlot = start;
 
         taskEXIT_CRITICAL();
-        return pdTRUE;
+        return pdPASS;
     }
 #endif
 
